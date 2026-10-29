@@ -1,0 +1,29 @@
+# Android
+android/local.properties
+**/.gradle/
+**/.kotlin/
+**/build/
+*.iml
+.idea/
+.vs/
+.vscode/
+
+# Python
+.venv/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+.coverage
+coverage.xml
+
+# OS and editor noise
+.DS_Store
+Thumbs.db
+*~
+*.orig
+*.rej
+.history/
+
+# Project documentation is source, despite the global docs/ ignore.
+!docs/
+!docs/**
