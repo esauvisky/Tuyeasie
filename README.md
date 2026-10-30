@@ -13,7 +13,10 @@ Tuyeasie pairs Tuya devices from an Android phone, extracts their local credenti
 - Authenticated `tuya-local` import with loaded-entry verification.
 - Encrypted storage for Home Assistant, Wi-Fi, Tuya, and device credentials.
 - Saved credentials and independent retry paths.
-- Camera ONVIF/RTSP automation under active development.
+- Automatic camera account setup with a prominent recovery warning.
+- ONVIF static-IP configuration and generated per-camera credentials.
+- Main and substream RTSP registration through Generic Camera or go2rtc.
+- Local camera settings through the included PTZ camera profile.
 
 ## Repository layout
 

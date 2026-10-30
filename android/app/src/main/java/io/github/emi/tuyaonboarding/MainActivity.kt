@@ -13,12 +13,33 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Devices
+import androidx.compose.material3.Icon
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.emi.tuyaonboarding.ui.MyDevicesScreen
+import io.github.emi.tuyaonboarding.ui.MyDevicesViewModel
 import io.github.emi.tuyaonboarding.ui.OnboardingScreen
 import io.github.emi.tuyaonboarding.ui.OnboardingViewModel
 import io.github.emi.tuyaonboarding.ui.theme.OnboardingTheme
 
 class MainActivity : ComponentActivity() {
     private val viewModel by viewModels<OnboardingViewModel>()
+    private val myDevicesViewModel by viewModels<MyDevicesViewModel>()
     private val scanPermissions = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) {
@@ -33,14 +54,53 @@ class MainActivity : ComponentActivity() {
         )
         setContent {
             OnboardingTheme {
-                OnboardingScreen(
-                    viewModel = viewModel,
-                    onRequestScanPermissions = { scanPermissions.launch(requiredScanPermissions()) },
-                    onOpenWifiSettings = {
-                        startActivity(Intent(Settings.ACTION_WIFI_SETTINGS))
-                    },
-                    onFinish = { finish() }
-                )
+                val onboardingState by viewModel.uiState.collectAsStateWithLifecycle()
+                var showMyDevices by rememberSaveable { mutableStateOf(false) }
+                val openMyDevices = {
+                    showMyDevices = true
+                    myDevicesViewModel.refresh()
+                }
+                Scaffold(
+                    bottomBar = {
+                        NavigationBar {
+                            NavigationBarItem(
+                                selected = !showMyDevices,
+                                onClick = { showMyDevices = false },
+                                icon = { Icon(Icons.Default.Add, contentDescription = null) },
+                                label = { Text("Add device") }
+                            )
+                            NavigationBarItem(
+                                selected = showMyDevices,
+                                onClick = openMyDevices,
+                                icon = { Icon(Icons.Default.Devices, contentDescription = null) },
+                                label = { Text("My Devices") }
+                            )
+                        }
+                    }
+                ) { padding ->
+                    Box(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
+                        if (showMyDevices) {
+                            MyDevicesScreen(
+                                viewModel = myDevicesViewModel,
+                                onBack = { showMyDevices = false },
+                                configureEnabled = !onboardingState.busy,
+                                onConfigureDevice = { device ->
+                                    viewModel.openDeviceSetup(device)
+                                    showMyDevices = false
+                                }
+                            )
+                        } else {
+                            OnboardingScreen(
+                                viewModel = viewModel,
+                                onRequestScanPermissions = { scanPermissions.launch(requiredScanPermissions()) },
+                                onOpenWifiSettings = {
+                                    startActivity(Intent(Settings.ACTION_WIFI_SETTINGS))
+                                },
+                                onFinish = openMyDevices
+                            )
+                        }
+                    }
+                }
             }
         }
     }
