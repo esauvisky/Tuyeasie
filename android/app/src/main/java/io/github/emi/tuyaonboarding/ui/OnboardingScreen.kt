@@ -633,6 +633,7 @@ private fun DestinationDialog(
                     style = MaterialTheme.typography.bodyMedium
                 )
                 listOf(
+                    StreamDestination.TUYA_LOCAL to "Tuya Local device (with controls)",
                     StreamDestination.GENERIC_CAMERA to "Generic Camera",
                     StreamDestination.GO2RTC to "go2rtc"
                 ).forEach { (destination, label) ->
@@ -1096,7 +1097,9 @@ private fun DoneStep(
     if (state.pendingDevice?.state == ImportState.PENDING || state.connectionError != null) {
         SecondaryAction("Home Assistant settings", onBackToConnection)
     }
-    OnvifCard(state, clipboard, onRetryOnvif, onToggleOnvifPassword, onRetryStreams, device.deviceId.isNotBlank())
+    if (state.openedFromDeviceSettings) {
+        OnvifCard(state, clipboard, onRetryOnvif, onToggleOnvifPassword, onRetryStreams, device.deviceId.isNotBlank())
+    }
     DisclosureSection(title = "View saved credentials") {
         Text(
             "Keep the local key private. Use it only with your own local integrations.",

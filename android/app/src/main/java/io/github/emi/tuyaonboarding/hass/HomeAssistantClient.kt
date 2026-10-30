@@ -64,7 +64,11 @@ class HomeAssistantClient(
         }
     }
 
-    fun importDevice(device: ActivatedDevice): ImportResult {
+    fun importDevice(
+        device: ActivatedDevice,
+        mainStreamUrl: String? = null,
+        subStreamUrl: String? = null
+    ): ImportResult {
         validateDevice(device)
         val reconnectDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RECONNECT_WINDOW_SECONDS)
         while (true) {
@@ -88,9 +92,30 @@ class HomeAssistantClient(
                 continue
             }
             session.use {
-                val outcome = sendImport(session, device)
+                val outcome = sendImport(session, device, mainStreamUrl, subStreamUrl)
                 return awaitLoadedEntry(session, device, outcome)
             }
+        }
+    }
+
+    fun configureTuyaStreams(deviceId: String, mainStreamUrl: String?, subStreamUrl: String?): String {
+        if (deviceId.isBlank() || (mainStreamUrl.isNullOrBlank() && subStreamUrl.isNullOrBlank())) {
+            throw HomeAssistantException(
+                HomeAssistantError.INVALID_FORMAT,
+                "Device ID and at least one stream URL are required."
+            )
+        }
+        openVerifiedSession().use { session ->
+            val fields = linkedMapOf<String, Any?>("device_id" to deviceId)
+            mainStreamUrl?.takeIf { it.isNotBlank() }?.let { fields["main_stream_url"] = it }
+            subStreamUrl?.takeIf { it.isNotBlank() }?.let { fields["sub_stream_url"] = it }
+            val response = session.callCommand("tuya_local/configure_streams", fields)
+            val result = response.getJSONObject("result")
+                ?: throw invalidResponse("Home Assistant returned no stream configuration result.")
+            val entryId = result.getString("entry_id")
+                ?: throw invalidResponse("Home Assistant returned no entry ID for stream configuration.")
+            awaitEntryLoaded(session, entryId)
+            return entryId
         }
     }
 
@@ -337,9 +362,14 @@ class HomeAssistantClient(
         }
     }
 
-    private fun sendImport(session: WebSocketSession, device: ActivatedDevice): ImportOutcome {
+    private fun sendImport(
+        session: WebSocketSession,
+        device: ActivatedDevice,
+        mainStreamUrl: String?,
+        subStreamUrl: String?
+    ): ImportOutcome {
         val id = session.nextCommandId()
-        session.send(HomeAssistantProtocol.importPayload(device, id))
+        session.send(HomeAssistantProtocol.importPayload(device, id, mainStreamUrl, subStreamUrl))
         val response = session.awaitResult(id, IMPORT_COMMAND_TIMEOUT_SECONDS)
         val result = response.getJSONObject("result")
             ?: throw invalidResponse("Home Assistant returned no import result.")
@@ -526,7 +556,12 @@ internal object HomeAssistantProtocol {
         return converted + "/api/websocket"
     }
 
-    fun importPayload(device: ActivatedDevice, id: Long): Map<String, Any?> {
+    fun importPayload(
+        device: ActivatedDevice,
+        id: Long,
+        mainStreamUrl: String? = null,
+        subStreamUrl: String? = null
+    ): Map<String, Any?> {
         val protocolVersion = device.protocolVersion?.trim()
             ?.takeIf { SUPPORTED_PROTOCOL_VERSION.matches(it) }
             ?: "auto"
@@ -542,6 +577,8 @@ internal object HomeAssistantProtocol {
         )
         device.category?.trim()?.takeIf { it.isNotEmpty() }?.let { payload["category"] = it }
         device.ip?.trim()?.takeIf(::isRfc1918Address)?.let { payload["ip"] = it }
+        mainStreamUrl?.trim()?.takeIf { it.isNotEmpty() }?.let { payload["main_stream_url"] = it }
+        subStreamUrl?.trim()?.takeIf { it.isNotEmpty() }?.let { payload["sub_stream_url"] = it }
         return payload
     }
 

@@ -78,6 +78,7 @@ enum class StreamStatus {
 }
 
 enum class StreamDestination(val storedName: String) {
+    TUYA_LOCAL("tuya_local"),
     GENERIC_CAMERA("generic_camera"),
     GO2RTC("go2rtc")
 }
@@ -109,6 +110,7 @@ data class OnboardingUiState(
     val activatedDevice: ActivatedDevice? = null,
     val importResult: ImportResult? = null,
     val showLocalKey: Boolean = false,
+    val openedFromDeviceSettings: Boolean = false,
     val cameraAccountDevice: TuyaBleDevice? = null,
     val cameraEmail: String = "",
     val cameraPassword: String = "",
@@ -142,6 +144,7 @@ data class OnboardingUiState(
 }
 
 private fun OnboardingUiState.withoutCameraState() = copy(
+    openedFromDeviceSettings = false,
     onvifStatus = OnvifStatus.IDLE,
     onvifError = null,
     onvifRecord = null,
@@ -883,6 +886,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                     activationError = pending.lastError,
                     showLocalKey = false
                 ).withoutCameraState().copy(
+                    openedFromDeviceSettings = true,
                     onvifRecord = onvif,
                     onvifStatus = if (onvif != null) OnvifStatus.COMPLETE else OnvifStatus.IDLE,
                     onvifError = null,
@@ -967,41 +971,96 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 step = WizardStep.ACTIVATE,
                 activatedDevice = device,
                 activationStatus = ActivationStatus.IMPORTING,
-                activationProgress = "Device activated. Importing it into Home Assistant…",
+                activationProgress = "Device activated. Configuring ONVIF (attempt 1 of 2)…",
                 activationError = null,
                 importResult = null
             ).withoutCameraState()
         }
         viewModelScope.launch {
+            withContext(Dispatchers.IO) { store.savePendingDevice(device) }
+            if (generation != importGeneration.get()) return@launch
+            var onvifConfigured: OnvifRecord? = withContext(Dispatchers.IO) {
+                store.loadOnvifRecord(device.deviceId)
+            }
+            if (onvifConfigured == null && device.deviceId.isNotBlank()) {
+                for (attempt in 1..2) {
+                    if (generation != importGeneration.get()) return@launch
+                    update {
+                        copy(
+                            activationProgress = if (attempt == 1)
+                                "Device activated. Configuring ONVIF (attempt 1 of 2)…"
+                            else "ONVIF setup failed, retrying (attempt 2 of 2)…"
+                        )
+                    }
+                    val existingPassword = withContext(Dispatchers.IO) {
+                        store.loadOnvifRecord(device.deviceId)?.password
+                            ?: store.loadPendingOnvifPassword(device.deviceId)
+                    }
+                    try {
+                        val record = onvifRepository.configure(device, existingPassword) { password ->
+                            withContext(Dispatchers.IO) {
+                                store.savePendingOnvifPassword(device.deviceId, password)
+                            }
+                        }
+                        withContext(Dispatchers.IO) { store.saveOnvifRecord(record) }
+                        onvifConfigured = record
+                        break
+                    } catch (_: CameraOnvifException) {
+                        // Try up to 2 times during registration; if both fail, add the device anyway.
+                    }
+                }
+            }
+            if (generation != importGeneration.get()) return@launch
+            update {
+                copy(activationProgress = "Importing device into Home Assistant…")
+            }
+            val deviceForImport = if (onvifConfigured != null) {
+                device.copy(ip = onvifConfigured.address)
+            } else {
+                device
+            }
+            val mainStreamUrl = onvifConfigured?.let { authenticatedUrl(it.mainUrl, it.password) }
+            val subStreamUrl = onvifConfigured?.let { authenticatedUrl(it.subUrl, it.password) }
             try {
                 val result = withContext(Dispatchers.IO) {
-                    store.savePendingDevice(device)
-                    homeAssistantClient.importDevice(device)
+                    store.savePendingDevice(deviceForImport)
+                    homeAssistantClient.importDevice(deviceForImport, mainStreamUrl, subStreamUrl)
                 }
                 if (generation != importGeneration.get()) return@launch
                 check(result.loaded) { "Home Assistant returned an unloaded import result" }
-                val imported = PendingDeviceRecord(device, ImportState.IMPORTED, null)
+                val imported = PendingDeviceRecord(deviceForImport, ImportState.IMPORTED, null)
+                val registeredOnvif = onvifConfigured?.copy(
+                    destination = StreamDestination.TUYA_LOCAL.storedName,
+                    registered = true
+                )
                 withContext(Dispatchers.IO) {
-                    if (generation == importGeneration.get()) store.savePendingDevice(imported)
+                    if (generation == importGeneration.get()) {
+                        store.savePendingDevice(imported)
+                        if (registeredOnvif != null) store.saveOnvifRecord(registeredOnvif)
+                    }
                 }
                 if (generation != importGeneration.get()) return@launch
                 update {
                     copy(
                         step = WizardStep.DONE,
                         pendingDevice = imported,
-                        activatedDevice = device,
+                        activatedDevice = deviceForImport,
                         importResult = result,
                         activationStatus = ActivationStatus.COMPLETE,
                         activationProgress = null,
-                        activationError = null
+                        activationError = null,
+                        onvifRecord = registeredOnvif,
+                        onvifStatus = if (registeredOnvif != null) OnvifStatus.COMPLETE else OnvifStatus.IDLE,
+                        streamDestination = if (registeredOnvif != null) StreamDestination.TUYA_LOCAL else null,
+                        streamStatus = if (registeredOnvif != null) StreamStatus.COMPLETE else StreamStatus.IDLE,
+                        mainEntryId = if (registeredOnvif != null) result.entryId else null,
+                        subEntryId = if (registeredOnvif != null) result.entryId else null
                     )
                 }
-                markOnvifConfiguring()
-                configureOnvif(device, generation)
             } catch (exception: HomeAssistantException) {
                 if (generation != importGeneration.get()) return@launch
                 val message = homeAssistantMessage(exception, current.settings)
-                val failed = PendingDeviceRecord(device, ImportState.PENDING, message)
+                val failed = PendingDeviceRecord(deviceForImport, ImportState.PENDING, message)
                 withContext(Dispatchers.IO) {
                     if (generation == importGeneration.get()) store.savePendingDevice(failed)
                 }
@@ -1009,7 +1068,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 update {
                     copy(
                         pendingDevice = failed,
-                        activatedDevice = device,
+                        activatedDevice = deviceForImport,
                         activationStatus = ActivationStatus.IMPORT_FAILED,
                         activationProgress = null,
                         activationError = message,
@@ -1071,12 +1130,22 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         }
         withContext(Dispatchers.IO) { store.saveOnvifRecord(configured) }
         if (generation != importGeneration.get()) return
-        update {
-            copy(
-                onvifStatus = OnvifStatus.COMPLETE,
-                onvifRecord = configured,
-                showDestinationDialog = connectionVerified
-            )
+        if (current.connectionVerified) {
+            update {
+                copy(
+                    onvifStatus = OnvifStatus.COMPLETE,
+                    onvifRecord = configured,
+                    streamDestination = StreamDestination.TUYA_LOCAL
+                )
+            }
+            registerStreams()
+        } else {
+            update {
+                copy(
+                    onvifStatus = OnvifStatus.COMPLETE,
+                    onvifRecord = configured
+                )
+            }
         }
     }
 
@@ -1152,6 +1221,44 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 } catch (exception: IllegalStateException) {
                     return null to sanitizeError(checkNotNull(exception.message), settings, device, record.password, *accountSecrets())
                 }
+            }
+
+            if (destination == StreamDestination.TUYA_LOCAL) {
+                try {
+                    val entryId = withContext(Dispatchers.IO) {
+                        homeAssistantClient.configureTuyaStreams(
+                            device.deviceId,
+                            authenticatedUrl(record.mainUrl, record.password),
+                            authenticatedUrl(record.subUrl, record.password)
+                        )
+                    }
+                    if (generation != importGeneration.get()) return@launch
+                    val registered = record.copy(destination = destination.storedName, registered = true)
+                    withContext(Dispatchers.IO) { store.saveOnvifRecord(registered) }
+                    if (generation != importGeneration.get()) return@launch
+                    update {
+                        copy(
+                            mainEntryId = entryId,
+                            subEntryId = entryId,
+                            mainError = null,
+                            subError = null,
+                            streamStatus = StreamStatus.COMPLETE,
+                            onvifRecord = registered
+                        )
+                    }
+                } catch (exception: HomeAssistantException) {
+                    if (generation != importGeneration.get()) return@launch
+                    val error = sanitizeError(homeAssistantMessage(exception, settings), settings, device, record.password, *accountSecrets())
+                    update {
+                        copy(
+                            mainError = error,
+                            subError = null,
+                            streamStatus = StreamStatus.FAILED,
+                            streamError = error
+                        )
+                    }
+                }
+                return@launch
             }
 
             if (current.mainEntryId == null) {

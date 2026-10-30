@@ -15,23 +15,28 @@ from .const import (
     API_PROTOCOL_VERSIONS,
     CONF_DEVICE_ID,
     CONF_LOCAL_KEY,
+    CONF_MAIN_STREAM_URL,
     CONF_MANUFACTURER,
     CONF_MODEL,
     CONF_POLL_ONLY,
     CONF_PROTOCOL_VERSION,
+    CONF_SUB_STREAM_URL,
     CONF_TYPE,
     DOMAIN,
 )
 
 IMPORT_VERSION = 1
 IMPORT_TYPE = "tuya_local/import_device"
+CONFIGURE_STREAMS_TYPE = "tuya_local/configure_streams"
 DATA_IMPORT_LOCKS = "import_locks"
 IMPORTER_OPTION_KEYS = {
     CONF_DEVICE_ID,
     CONF_HOST,
     CONF_LOCAL_KEY,
+    CONF_MAIN_STREAM_URL,
     CONF_PROTOCOL_VERSION,
     CONF_POLL_ONLY,
+    CONF_SUB_STREAM_URL,
     CONF_TYPE,
     CONF_MANUFACTURER,
     CONF_MODEL,
@@ -89,6 +94,8 @@ class ImportRequest:
     protocol_version: str | float
     category: str | None
     ip: str | None
+    main_stream_url: str | None = field(default=None, repr=False)
+    sub_stream_url: str | None = field(default=None, repr=False)
 
 
 def _version(value: Any) -> int:
@@ -112,6 +119,13 @@ def _ip(value: Any) -> str:
     return text
 
 
+def _rtsp_url(value: Any) -> str:
+    text = _nonempty(value)
+    if not text.lower().startswith("rtsp://"):
+        raise vol.Invalid("Stream URL must use rtsp://")
+    return text
+
+
 IMPORT_DATA_SCHEMA = vol.Schema(
     {
         vol.Required("import_version"): _version,
@@ -124,6 +138,8 @@ IMPORT_DATA_SCHEMA = vol.Schema(
         ),
         vol.Optional("category"): _nonempty,
         vol.Optional("ip"): _ip,
+        vol.Optional(CONF_MAIN_STREAM_URL): _rtsp_url,
+        vol.Optional(CONF_SUB_STREAM_URL): _rtsp_url,
     },
     extra=vol.PREVENT_EXTRA,
 )
@@ -150,6 +166,8 @@ def validate_import(data: dict[str, Any]) -> ImportRequest:
         protocol_version="auto" if protocol == "auto" else float(protocol),
         category=values.get("category"),
         ip=values.get("ip"),
+        main_stream_url=values.get(CONF_MAIN_STREAM_URL),
+        sub_stream_url=values.get(CONF_SUB_STREAM_URL),
     )
 
 
@@ -211,6 +229,10 @@ async def async_verify_import(hass, request: ImportRequest) -> VerifiedImport:
         config[CONF_TYPE] = config_type
         if protocol_version == "auto":
             config[CONF_PROTOCOL_VERSION] = device._protocol_configured
+        if request.main_stream_url is not None:
+            config[CONF_MAIN_STREAM_URL] = request.main_stream_url
+        if request.sub_stream_url is not None:
+            config[CONF_SUB_STREAM_URL] = request.sub_stream_url
         return VerifiedImport(config)
     finally:
         device._api.set_socketPersistent(False)
@@ -273,8 +295,74 @@ async def async_import_device(hass, data: dict[str, Any]) -> dict[str, Any]:
         }
 
 
+CONFIGURE_STREAMS_SCHEMA = vol.Schema(
+    {
+        vol.Required("device_id"): _nonempty,
+        vol.Optional(CONF_MAIN_STREAM_URL): _rtsp_url,
+        vol.Optional(CONF_SUB_STREAM_URL): _rtsp_url,
+    },
+    extra=vol.PREVENT_EXTRA,
+)
+
+
+async def async_configure_streams(hass, data: dict[str, Any]) -> dict[str, Any]:
+    values = CONFIGURE_STREAMS_SCHEMA(data)
+    device_id = values["device_id"]
+    main_url = values.get(CONF_MAIN_STREAM_URL)
+    sub_url = values.get(CONF_SUB_STREAM_URL)
+    if main_url is None and sub_url is None:
+        raise DeviceImportError(
+            "invalid_format", "At least one stream URL is required"
+        )
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    locks = domain_data.setdefault(DATA_IMPORT_LOCKS, {})
+    lock = locks.setdefault(device_id, asyncio.Lock())
+    async with lock:
+        existing = hass.config_entries.async_entry_for_domain_unique_id(
+            DOMAIN, device_id
+        )
+        if existing is None:
+            raise DeviceImportError(
+                "not_found", f"No tuya-local entry found for {device_id}"
+            )
+        updated_data = dict(existing.data)
+        if main_url is not None:
+            updated_data[CONF_MAIN_STREAM_URL] = main_url
+        if sub_url is not None:
+            updated_data[CONF_SUB_STREAM_URL] = sub_url
+        if updated_data != existing.data:
+            hass.config_entries.async_update_entry(
+                existing,
+                data=updated_data,
+            )
+            if not existing.update_listeners:
+                hass.config_entries.async_schedule_reload(existing.entry_id)
+        return {
+            "device_id": device_id,
+            "entry_id": existing.entry_id,
+        }
+
+
 def async_register_importer(hass) -> None:
     websocket_api.async_register_command(hass, websocket_import_device)
+    websocket_api.async_register_command(hass, websocket_configure_streams)
+
+
+@websocket_api.websocket_command(
+    {**CONFIGURE_STREAMS_SCHEMA.schema, vol.Required("type"): CONFIGURE_STREAMS_TYPE}
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_configure_streams(hass, connection, msg):
+    data = {key: value for key, value in msg.items() if key not in {"id", "type"}}
+    try:
+        result = await async_configure_streams(hass, data)
+    except vol.Invalid as error:
+        connection.send_error(msg["id"], "invalid_format", str(error))
+    except DeviceImportError as error:
+        connection.send_error(msg["id"], error.code, str(error))
+    else:
+        connection.send_result(msg["id"], result)
 
 
 @websocket_api.websocket_command(

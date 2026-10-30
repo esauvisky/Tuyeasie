@@ -7,6 +7,7 @@ import logging
 from homeassistant.components.camera import Camera as CameraEntity
 from homeassistant.components.camera import CameraEntityFeature
 
+from .const import CONF_MAIN_STREAM_URL, CONF_SUB_STREAM_URL
 from .device import TuyaLocalDevice
 from .entity import TuyaLocalEntity
 from .helpers.config import async_tuya_setup_platform
@@ -22,19 +23,25 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
         async_add_entities,
         config,
         "camera",
-        TuyaLocalCamera,
+        lambda device, ecfg: TuyaLocalCamera(device, ecfg, config),
     )
 
 
 class TuyaLocalCamera(TuyaLocalEntity, CameraEntity):
     """Representation of a Tuya Camera"""
 
-    def __init__(self, device: TuyaLocalDevice, config: TuyaEntityConfig):
+    def __init__(
+        self,
+        device: TuyaLocalDevice,
+        config: TuyaEntityConfig,
+        entry_config: dict | None = None,
+    ):
         """
         Initialise the camera.
         Args:
             device (TuyaLocalDevice): the device API instance
             config (TuyaEntityConfig): the configuration for this entity
+            entry_config (dict | None): the config entry data/options
         """
         super().__init__()
         dps_map = self._init_begin(device, config)
@@ -42,10 +49,35 @@ class TuyaLocalCamera(TuyaLocalEntity, CameraEntity):
         self._snapshot_dp = dps_map.pop("snapshot", None)
         self._record_dp = dps_map.pop("record", None)
         self._motion_enable_dp = dps_map.pop("motion_enable", None)
+        self._stream_url = self._resolve_stream_url(config, entry_config or {})
 
         self._init_end(dps_map)
         if self._switch_dp:
             self._attr_supported_features |= CameraEntityFeature.ON_OFF
+        if self._stream_url:
+            self._attr_supported_features |= CameraEntityFeature.STREAM
+
+    @staticmethod
+    def _resolve_stream_url(
+        config: TuyaEntityConfig, entry_config: dict
+    ) -> str | None:
+        if config.config_id == "camera_substream":
+            return entry_config.get(CONF_SUB_STREAM_URL)
+        return entry_config.get(CONF_MAIN_STREAM_URL)
+
+    @property
+    def available(self):
+        if self._config.config_id == "camera_substream" and not self._stream_url:
+            return False
+        return super().available
+
+    @property
+    def use_stream_for_stills(self) -> bool:
+        return bool(self._stream_url)
+
+    async def async_stream_source(self) -> str | None:
+        """Return the RTSP stream source if configured."""
+        return self._stream_url
 
     @property
     def is_recording(self):

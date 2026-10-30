@@ -2,6 +2,50 @@ name: PTZ camera
 products:
   - id: 8ycqqrur4yrntiva
 entities:
+  - entity: camera
+    name: Main
+    dps:
+      - id: 105
+        type: boolean
+        name: switch
+        mapping:
+          - dps_val: false
+            value: true
+          - dps_val: true
+            value: false
+      - id: 134
+        type: boolean
+        name: motion_enable
+      - id: 150
+        type: boolean
+        name: record
+      - id: 115
+        type: base64
+        optional: true
+        sensitive: true
+        name: snapshot
+  - entity: camera
+    name: Substream
+    dps:
+      - id: 105
+        type: boolean
+        name: switch
+        mapping:
+          - dps_val: false
+            value: true
+          - dps_val: true
+            value: false
+      - id: 134
+        type: boolean
+        name: motion_enable
+      - id: 150
+        type: boolean
+        name: record
+      - id: 115
+        type: base64
+        optional: true
+        sensitive: true
+        name: snapshot
   - entity: switch
     name: Camera privacy
     icon: "mdi:incognito"
