@@ -102,14 +102,20 @@ class ConfigFlowHandler(ConfigFlow, domain=DOMAIN):
         title = data.pop(CONF_NAME)
         await self.async_set_unique_id(get_device_id(data), raise_on_progress=False)
         self._abort_if_unique_id_configured()
+        host = data.get(CONF_HOST)
         for flow in self.hass.config_entries.flow.async_progress_by_handler(
-            DOMAIN,
-            include_uninitialized=True,
-            match_context={"unique_id": self.unique_id},
+            DOMAIN, include_uninitialized=True
         ):
             if (
-                flow["flow_id"] != self.flow_id
-                and flow["context"]["source"] == SOURCE_INTEGRATION_DISCOVERY
+                flow["flow_id"] == self.flow_id
+                or flow["context"]["source"] != SOURCE_INTEGRATION_DISCOVERY
+            ):
+                continue
+            # A re-paired device gets a new id at the same address, so discovery
+            # flows for earlier ids at this host are stale identities.
+            discovered_host = flow["context"].get("title_placeholders", {}).get("name")
+            if flow["context"].get("unique_id") == self.unique_id or (
+                host is not None and discovered_host == host
             ):
                 self.hass.config_entries.flow.async_abort(flow["flow_id"])
         return self.async_create_entry(title=title, data=data)

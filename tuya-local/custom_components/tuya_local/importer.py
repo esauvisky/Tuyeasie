@@ -161,6 +161,7 @@ class VerifiedImport:
 async def async_verify_import(hass, request: ImportRequest) -> VerifiedImport:
     host = request.ip
     local_product_id = None
+    protocol_version = request.protocol_version
     if host is None:
         try:
             local = await hass.async_add_executor_job(
@@ -170,6 +171,13 @@ async def async_verify_import(hass, request: ImportRequest) -> VerifiedImport:
             raise DeviceImportError("discovery_failed", str(error)) from error
         host = local.get("ip")
         local_product_id = local.get("product_id")
+        if protocol_version == "auto":
+            local_version = local.get("version")
+            if local_version is not None:
+                supported_protocols = {str(v): v for v in API_PROTOCOL_VERSIONS}
+                matched = supported_protocols.get(str(local_version))
+                if matched is not None:
+                    protocol_version = matched
         if not host:
             raise DeviceImportError(
                 "discovery_failed", f"Could not discover {request.device_id} on the LAN"
@@ -179,7 +187,7 @@ async def async_verify_import(hass, request: ImportRequest) -> VerifiedImport:
         CONF_DEVICE_ID: request.device_id,
         CONF_HOST: host,
         CONF_LOCAL_KEY: request.local_key,
-        CONF_PROTOCOL_VERSION: request.protocol_version,
+        CONF_PROTOCOL_VERSION: protocol_version,
         CONF_POLL_ONLY: False,
     }
     with _suppress_tinytuya_debug():
@@ -201,7 +209,7 @@ async def async_verify_import(hass, request: ImportRequest) -> VerifiedImport:
                 product_id=request.product_id,
             )
         config[CONF_TYPE] = config_type
-        if request.protocol_version == "auto":
+        if protocol_version == "auto":
             config[CONF_PROTOCOL_VERSION] = device._protocol_configured
         return VerifiedImport(config)
     finally:

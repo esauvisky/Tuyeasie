@@ -117,17 +117,19 @@ async def test_verify_discovers_and_matches(hass, mocker, import_request, device
         "custom_components.tuya_local.importer.scan_for_device",
         return_value={
             "ip": "192.168.1.22",
-            "version": 3.4,
+            "version": 3.5,
             "product_id": "localpid",
             "data": {"productKey": "nestedpid"},
         },
     )
-    mocker.patch(
+    test_conn = mocker.patch(
         "custom_components.tuya_local.importer.async_test_connection",
         new=AsyncMock(return_value=device),
     )
     verified = await async_verify_import(hass, import_request)
     assert verified.config[CONF_HOST] == "192.168.1.22"
+    assert verified.config[CONF_PROTOCOL_VERSION] == 3.5
+    assert test_conn.call_args.args[0][CONF_PROTOCOL_VERSION] == 3.5
     assert verified.config["type"] == "kogan_kahtp_heater"
     assert VALID["local_key"] not in repr(verified)
     device.set_detected_product_id.assert_any_call("productid")
@@ -320,6 +322,31 @@ async def test_import_adds_new_entry_aborts_pending_discovery(
     assert result["outcome"] == "added"
     assert len(hass.config_entries.async_entries(DOMAIN)) == 1
     assert hass.config_entries.flow.async_progress_by_handler(DOMAIN) == []
+
+
+async def test_import_aborts_stale_discovery_at_same_host(hass, mocker, bypass_setup):
+    stale = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": "integration_discovery"},
+        data={CONF_DEVICE_ID: "olddeviceid", CONF_HOST: "192.168.1.22"},
+    )
+    other = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": "integration_discovery"},
+        data={CONF_DEVICE_ID: "otherdevice", CONF_HOST: "192.168.1.99"},
+    )
+    assert stale["type"] == FlowResultType.FORM
+    assert other["type"] == FlowResultType.FORM
+    mocker.patch(
+        "custom_components.tuya_local.importer.async_verify_import",
+        new=AsyncMock(return_value=VerifiedImport(_data("newkey"))),
+    )
+
+    result = await async_import_device(hass, VALID)
+
+    assert result["outcome"] == "added"
+    remaining = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+    assert [flow["flow_id"] for flow in remaining] == [other["flow_id"]]
 
 
 async def test_import_updates_rotated_key(hass, mocker):
