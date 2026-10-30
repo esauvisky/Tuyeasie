@@ -26,7 +26,28 @@ data class ActivatedDevice(
 data class TuyaAccount(
     val uid: String,
     val password: String
-)
+) {
+    override fun toString() = "TuyaAccount(uid=$uid, password=[redacted])"
+}
+
+data class OnvifRecord(
+    val deviceId: String,
+    val address: String,
+    val password: String,
+    val mainUrl: String,
+    val subUrl: String,
+    val destination: String? = null,
+    val registered: Boolean = false,
+    val mainCodec: String? = null,
+    val mainResolution: String? = null,
+    val subCodec: String? = null,
+    val subResolution: String? = null
+) {
+    override fun toString() =
+        "OnvifRecord(deviceId=$deviceId, address=$address, password=[redacted], " +
+            "mainUrl=[redacted], subUrl=[redacted], destination=$destination, registered=$registered, " +
+            "mainCodec=$mainCodec, mainResolution=$mainResolution, subCodec=$subCodec, subResolution=$subResolution)"
+}
 
 enum class ImportState {
     PENDING,
@@ -86,6 +107,98 @@ class SecureSettingsStore(context: Context) {
         check(committed) { "Unable to persist Tuya account" }
         return account
     }
+
+    fun loadCameraAccount(): TuyaAccount? {
+        val uid = preferences.getString(KEY_CAMERA_EMAIL, null) ?: return null
+        return TuyaAccount(uid, checkNotNull(preferences.getString(KEY_CAMERA_PASSWORD, null)) {
+            "Stored camera account has no password"
+        })
+    }
+
+    fun saveCameraAccount(account: TuyaAccount) {
+        val editor = preferences.edit()
+            .putString(KEY_CAMERA_EMAIL, account.uid)
+            .putString(KEY_CAMERA_PASSWORD, account.password)
+            .remove(KEY_EXTRA_ACCOUNTS)
+        preferences.all.keys
+            .filter { it.startsWith(KEY_EXTRA_PASSWORD_PREFIX) }
+            .forEach { editor.remove(it) }
+        val committed = editor.commit()
+        check(committed) { "Unable to persist camera account" }
+    }
+
+    fun loadExistingTuyaAccount(): TuyaAccount? {
+        val uid = preferences.getString(KEY_TUYA_UID, null) ?: return null
+        return TuyaAccount(uid, checkNotNull(preferences.getString(KEY_TUYA_PASSWORD, null)) {
+            "Stored Tuya account has no password"
+        })
+    }
+
+    fun deleteGeneratedTuyaAccount() {
+        val committed = preferences.edit().remove(KEY_TUYA_UID).remove(KEY_TUYA_PASSWORD).commit()
+        check(committed) { "Unable to delete Tuya account" }
+    }
+
+    fun deleteCameraAccount() {
+        val editor = preferences.edit()
+            .remove(KEY_CAMERA_EMAIL)
+            .remove(KEY_CAMERA_PASSWORD)
+            .remove(KEY_EXTRA_ACCOUNTS)
+        preferences.all.keys
+            .filter { it.startsWith(KEY_EXTRA_PASSWORD_PREFIX) }
+            .forEach { editor.remove(it) }
+        val committed = editor.commit()
+        check(committed) { "Unable to delete camera account" }
+    }
+
+    fun loadOnvifRecord(deviceId: String): OnvifRecord? {
+        val address = preferences.getString(onvifKey(deviceId, "address"), null) ?: return null
+        fun required(field: String) = checkNotNull(preferences.getString(onvifKey(deviceId, field), null)) {
+            "Stored ONVIF record for $deviceId has no $field"
+        }
+        return OnvifRecord(
+            deviceId = deviceId,
+            address = address,
+            password = required("password"),
+            mainUrl = required("main_url"),
+            subUrl = required("sub_url"),
+            destination = preferences.getString(onvifKey(deviceId, "destination"), null),
+            registered = preferences.getBoolean(onvifKey(deviceId, "registered"), false),
+            mainCodec = preferences.getString(onvifKey(deviceId, "main_codec"), null),
+            mainResolution = preferences.getString(onvifKey(deviceId, "main_resolution"), null),
+            subCodec = preferences.getString(onvifKey(deviceId, "sub_codec"), null),
+            subResolution = preferences.getString(onvifKey(deviceId, "sub_resolution"), null)
+        )
+    }
+
+    fun loadPendingOnvifPassword(deviceId: String): String? =
+        preferences.getString(onvifKey(deviceId, "pending_password"), null)
+
+    fun savePendingOnvifPassword(deviceId: String, password: String) {
+        val committed = preferences.edit()
+            .putString(onvifKey(deviceId, "pending_password"), password)
+            .commit()
+        check(committed) { "Unable to persist pending ONVIF password" }
+    }
+
+    fun saveOnvifRecord(record: OnvifRecord) {
+        val committed = preferences.edit()
+            .remove(onvifKey(record.deviceId, "pending_password"))
+            .putString(onvifKey(record.deviceId, "address"), record.address)
+            .putString(onvifKey(record.deviceId, "password"), record.password)
+            .putString(onvifKey(record.deviceId, "main_url"), record.mainUrl)
+            .putString(onvifKey(record.deviceId, "sub_url"), record.subUrl)
+            .putString(onvifKey(record.deviceId, "destination"), record.destination)
+            .putBoolean(onvifKey(record.deviceId, "registered"), record.registered)
+            .putString(onvifKey(record.deviceId, "main_codec"), record.mainCodec)
+            .putString(onvifKey(record.deviceId, "main_resolution"), record.mainResolution)
+            .putString(onvifKey(record.deviceId, "sub_codec"), record.subCodec)
+            .putString(onvifKey(record.deviceId, "sub_resolution"), record.subResolution)
+            .commit()
+        check(committed) { "Unable to persist ONVIF record" }
+    }
+
+    private fun onvifKey(deviceId: String, field: String) = "${ONVIF_PREFIX}${deviceId}_$field"
 
     private fun randomHex(bytes: Int): String =
         ByteArray(bytes).also(SecureRandom()::nextBytes).joinToString("") { "%02x".format(it) }
@@ -157,7 +270,16 @@ class SecureSettingsStore(context: Context) {
             settings.adminToken,
             settings.homeWifiPassword,
             settings.homeWifiSsid,
-            device.localKey
+            device.localKey,
+            loadCameraAccount()?.password.orEmpty(),
+            preferences.getString(KEY_TUYA_PASSWORD, null).orEmpty()
+        ).plus(
+            preferences.all
+                .filterKeys {
+                    it.startsWith(ONVIF_PREFIX) &&
+                        (it.endsWith("_password") || it.endsWith("_main_url") || it.endsWith("_sub_url"))
+                }
+                .values.map { it as String }
         ).filter { it.isNotEmpty() }
             .forEach { secret -> sanitized = sanitized.replace(secret, "[redacted]") }
         return sanitized.take(MAX_ERROR_LENGTH)
@@ -171,6 +293,11 @@ class SecureSettingsStore(context: Context) {
         const val KEY_WIFI_PASSWORD = "home_wifi_password"
         const val KEY_TUYA_UID = "tuya_uid"
         const val KEY_TUYA_PASSWORD = "tuya_password"
+        const val KEY_CAMERA_EMAIL = "camera_account_email"
+        const val KEY_CAMERA_PASSWORD = "camera_account_password"
+        const val KEY_EXTRA_ACCOUNTS = "extra_tuya_accounts"
+        const val KEY_EXTRA_PASSWORD_PREFIX = "extra_tuya_password_"
+        const val ONVIF_PREFIX = "onvif_"
         const val KEY_DEVICE_ID = "device_id"
         const val KEY_LOCAL_KEY = "device_local_key"
         const val KEY_DEVICE_NAME = "device_name"

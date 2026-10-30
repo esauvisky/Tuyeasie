@@ -22,6 +22,13 @@ data class TuyaHotspot(
     val signalLevel: Int
 )
 
+data class NearbyNetwork(
+    val ssid: String,
+    val signalDbm: Int,
+    val signalLevel: Int,
+    val has24Ghz: Boolean
+)
+
 class HotspotRepository(context: Context) {
     interface Listener {
         fun onScanResults(hotspots: List<TuyaHotspot>)
@@ -85,6 +92,25 @@ class HotspotRepository(context: Context) {
             }
         }
     }
+
+    // Android throttles startScan (returns false) by design; callers still read the system's cached results.
+    fun requestNearbyScan() {
+        wifiManager.startScan()
+    }
+
+    fun readNearbyNetworks(): List<NearbyNetwork> = wifiManager.scanResults
+        .filter { it.SSID.isNotBlank() }
+        .groupBy { it.SSID }
+        .map { (ssid, results) ->
+            val strongest = results.maxBy { it.level }
+            NearbyNetwork(
+                ssid = ssid,
+                signalDbm = strongest.level,
+                signalLevel = WifiManager.calculateSignalLevel(strongest.level, SIGNAL_LEVELS),
+                has24Ghz = results.any { it.frequency < FIVE_GHZ_MIN_MHZ }
+            )
+        }
+        .sortedWith(compareByDescending<NearbyNetwork> { it.signalDbm }.thenBy { it.ssid })
 
     @RequiresApi(Build.VERSION_CODES.Q)
     fun connect(ssid: String) {
@@ -208,6 +234,7 @@ class HotspotRepository(context: Context) {
     private companion object {
         val HOTSPOT_PREFIXES = listOf("SmartLife", "Tuya", "SL-")
         const val SIGNAL_LEVELS = 4
+        const val FIVE_GHZ_MIN_MHZ = 4900
         const val SCAN_TIMEOUT_MILLIS = 15_000L
         const val NETWORK_TIMEOUT_MILLIS = 30_000
     }

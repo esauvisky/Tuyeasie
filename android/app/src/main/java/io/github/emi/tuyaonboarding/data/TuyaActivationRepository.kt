@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import com.thingclips.smart.android.user.api.ILoginCallback
+import com.thingclips.smart.android.user.api.IRegisterCallback
 import com.thingclips.smart.android.user.bean.User
 import com.thingclips.smart.home.sdk.ThingHomeSdk
 import com.thingclips.smart.home.sdk.bean.HomeBean
@@ -18,6 +19,8 @@ import com.thingclips.smart.sdk.api.IThingSmartActivatorListener
 import com.thingclips.smart.sdk.bean.DeviceBean
 import com.thingclips.smart.sdk.bean.MultiModeActivatorBean
 import com.thingclips.smart.sdk.enums.ActivatorModelEnum
+
+enum class AccountAuth { LOGIN, REGISTER, LOGIN_OR_REGISTER }
 
 class TuyaActivationRepository(context: Context) {
     interface Listener {
@@ -40,27 +43,42 @@ class TuyaActivationRepository(context: Context) {
 
     var listener: Listener? = null
 
-    fun prepare(countryCode: String, account: TuyaAccount) {
+    fun prepare(countryCode: String, account: TuyaAccount, auth: AccountAuth) {
         stopActivator()
         activationToken = null
         homeId = null
         val generation = ++operationGeneration
         progress(generation, "Signing in to the Tuya account…")
-        // The official app upgrades its guest to a full account before Bluetooth pairing; match that.
-        ThingHomeSdk.getUserInstance().loginOrRegisterWithUid(
-            countryCode,
-            account.uid,
-            account.password,
-            object : ILoginCallback {
-                override fun onSuccess(user: User) = onCurrent(generation) {
-                    queryHomes(generation)
-                }
-
-                override fun onError(code: String, error: String) = onCurrent(generation) {
-                    failure("Tuya account sign-in", code, error)
-                }
+        val loginCallback = object : ILoginCallback {
+            override fun onSuccess(user: User) = onCurrent(generation) {
+                queryHomes(generation)
             }
-        )
+
+            override fun onError(code: String, error: String) = onCurrent(generation) {
+                failure("Tuya account sign-in", code, error)
+            }
+        }
+        val user = ThingHomeSdk.getUserInstance()
+        when (auth) {
+            AccountAuth.LOGIN -> user.loginWithUid(countryCode, account.uid, account.password, loginCallback)
+            // The official app upgrades its guest to a full account before Bluetooth pairing; match that.
+            AccountAuth.LOGIN_OR_REGISTER ->
+                user.loginOrRegisterWithUid(countryCode, account.uid, account.password, loginCallback)
+            AccountAuth.REGISTER -> user.registerAccountWithUid(
+                countryCode,
+                account.uid,
+                account.password,
+                object : IRegisterCallback {
+                    override fun onSuccess(user: User) = onCurrent(generation) {
+                        queryHomes(generation)
+                    }
+
+                    override fun onError(code: String, error: String) = onCurrent(generation) {
+                        failure("Tuya account registration", code, error)
+                    }
+                }
+            )
+        }
     }
 
     fun startActivation(settings: AppSettings) {
