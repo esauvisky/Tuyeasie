@@ -5,12 +5,15 @@ import com.alibaba.fastjson.JSONException
 import com.alibaba.fastjson.JSONObject
 import io.github.emi.tuyaonboarding.data.ActivatedDevice
 import io.github.emi.tuyaonboarding.data.SecureSettingsStore
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import java.io.Closeable
+import java.io.IOException
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
@@ -45,8 +48,9 @@ enum class HomeAssistantError {
 
 class HomeAssistantException(
     val error: HomeAssistantError,
-    val publicMessage: String
-) : Exception(publicMessage)
+    val publicMessage: String,
+    cause: Throwable? = null
+) : Exception(publicMessage, cause)
 
 class HomeAssistantClient(
     private val settingsStore: SecureSettingsStore,
@@ -88,6 +92,177 @@ class HomeAssistantClient(
                 return awaitLoadedEntry(session, device, outcome)
             }
         }
+    }
+
+    fun createCamera(name: String, streamUrl: String, username: String, password: String): String {
+        if (name.isBlank() || streamUrl.isBlank()) {
+            throw HomeAssistantException(
+                HomeAssistantError.INVALID_FORMAT,
+                "Camera name and stream URL are required."
+            )
+        }
+        val entryId = findCameraEntryId(name) ?: createCameraEntry(streamUrl, username, password)
+        openVerifiedSession().use { session ->
+            session.callCommand("config_entries/update", mapOf("entry_id" to entryId, "title" to name))
+            awaitEntryLoaded(session, entryId)
+        }
+        return entryId
+    }
+
+    private fun findCameraEntryId(name: String): String? {
+        val entries = try {
+            JSON.parseArray(httpRequest("GET", "/api/config/config_entries/entry?domain=generic", null))
+        } catch (e: JSONException) {
+            throw HomeAssistantException(
+                HomeAssistantError.INVALID_RESPONSE,
+                "Home Assistant returned invalid JSON.",
+                e
+            )
+        } ?: throw invalidResponse("Home Assistant returned no generic camera entry list.")
+        for (index in 0 until entries.size) {
+            val entry = entries.getJSONObject(index)
+            if (entry.getString("title") == name) {
+                return entry.getString("entry_id")
+                    ?: throw invalidResponse("A generic camera entry has no entry ID.")
+            }
+        }
+        return null
+    }
+
+    private fun createCameraEntry(streamUrl: String, username: String, password: String): String {
+        val start = postFlow("/api/config/config_entries/flow", mapOf("handler" to "generic"))
+        requireFlowStep(start, "user")
+        val flowId = start.getString("flow_id")
+            ?: throw invalidResponse("Home Assistant returned no camera flow ID.")
+        val flowPath = "/api/config/config_entries/flow/$flowId"
+        val form = postFlow(
+            flowPath,
+            mapOf(
+                "stream_source" to streamUrl,
+                "username" to username,
+                "password" to password,
+                "advanced" to mapOf(
+                    "framerate" to 2,
+                    "verify_ssl" to true,
+                    "rtsp_transport" to "tcp",
+                    "authentication" to "basic"
+                )
+            )
+        )
+        requireFlowStep(form, "user_confirm")
+        val created = postFlow(flowPath, mapOf("confirmed_ok" to true))
+        if (created.getString("type") != "create_entry") {
+            throw flowFailure(created)
+        }
+        return created.getJSONObject("result")?.getString("entry_id")
+            ?: throw invalidResponse("Home Assistant returned no camera entry ID.")
+    }
+
+    private fun requireFlowStep(response: JSONObject, stepId: String) {
+        if (response.getString("type") != "form" || response.getString("step_id") != stepId) {
+            throw flowFailure(response)
+        }
+        val errors = response.getJSONObject("errors")
+        if (errors != null && errors.isNotEmpty()) {
+            throw flowFailure(response)
+        }
+    }
+
+    private fun flowFailure(response: JSONObject): HomeAssistantException {
+        val detail = response.getJSONObject("errors")?.toJSONString()
+            ?: response.getString("reason")
+            ?: response.getString("type")
+        return HomeAssistantException(
+            HomeAssistantError.SERVER_ERROR,
+            "Home Assistant rejected the camera configuration: $detail"
+        )
+    }
+
+    private fun postFlow(path: String, body: Map<String, Any?>): JSONObject {
+        val text = httpRequest("POST", path, JSON.toJSONString(body))
+        return try {
+            JSON.parseObject(text)
+        } catch (e: JSONException) {
+            throw HomeAssistantException(
+                HomeAssistantError.INVALID_RESPONSE,
+                "Home Assistant returned invalid JSON.",
+                e
+            )
+        } ?: throw invalidResponse("Home Assistant returned an empty response.")
+    }
+
+    private fun httpRequest(method: String, path: String, jsonBody: String?): String {
+        val settings = settingsStore.loadSettings()
+        if (settings.hassUrl.isBlank() || settings.adminToken.isBlank()) {
+            throw HomeAssistantException(
+                HomeAssistantError.INVALID_FORMAT,
+                "Home Assistant URL and admin token are required."
+            )
+        }
+        val base = settings.hassUrl.trim().trimEnd('/')
+        if (!base.startsWith("http://", ignoreCase = true) && !base.startsWith("https://", ignoreCase = true)) {
+            throw HomeAssistantException(
+                HomeAssistantError.INVALID_FORMAT,
+                "Home Assistant URL must use http or https."
+            )
+        }
+        val builder = try {
+            Request.Builder().url(base + path)
+        } catch (e: IllegalArgumentException) {
+            throw HomeAssistantException(
+                HomeAssistantError.INVALID_FORMAT,
+                "Home Assistant URL is invalid."
+            )
+        }
+        builder.header("Authorization", "Bearer ${settings.adminToken}")
+        builder.method(method, jsonBody?.toRequestBody("application/json".toMediaType()))
+        try {
+            httpClient.newCall(builder.build()).execute().use { response ->
+                if (response.code == 401) throw serverError("unauthorized")
+                if (response.code != 200 && response.code != 201) {
+                    throw HomeAssistantException(
+                        HomeAssistantError.SERVER_ERROR,
+                        "Home Assistant returned HTTP ${response.code} for $method $path."
+                    )
+                }
+                return response.body?.string()
+                    ?: throw invalidResponse("Home Assistant returned an empty response.")
+            }
+        } catch (e: IOException) {
+            throw HomeAssistantException(
+                HomeAssistantError.CONNECTION_FAILED,
+                "Could not reach the Home Assistant REST API.",
+                e
+            )
+        }
+    }
+
+    private fun awaitEntryLoaded(session: WebSocketSession, entryId: String) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(IMPORT_TIMEOUT_SECONDS)
+        while (System.nanoTime() < deadline) {
+            val response = session.callCommand("config_entries/get")
+            val entries = response.getJSONArray("result")
+                ?: throw invalidResponse("Home Assistant returned no config-entry list.")
+            for (index in 0 until entries.size) {
+                val entry = entries.getJSONObject(index)
+                if (entry.getString("entry_id") == entryId && entry.getString("state") == "loaded") {
+                    return
+                }
+            }
+            try {
+                Thread.sleep(POLL_INTERVAL_MILLIS)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw HomeAssistantException(
+                    HomeAssistantError.INTERRUPTED,
+                    "Config-entry loading poll was interrupted."
+                )
+            }
+        }
+        throw HomeAssistantException(
+            HomeAssistantError.ENTRY_NOT_LOADED,
+            "Timed out waiting for the generic camera config entry to finish loading."
+        )
     }
 
     private fun openVerifiedSession(): WebSocketSession {
@@ -261,9 +436,9 @@ class HomeAssistantClient(
             }
         }
 
-        fun callCommand(type: String): JSONObject {
+        fun callCommand(type: String, fields: Map<String, Any?> = emptyMap()): JSONObject {
             val id = nextCommandId()
-            send(mapOf("id" to id, "type" to type))
+            send(mapOf("id" to id, "type" to type) + fields)
             return awaitResult(id)
         }
 
