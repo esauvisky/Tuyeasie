@@ -92,10 +92,150 @@ class HomeAssistantClient(
                 continue
             }
             session.use {
-                val outcome = sendImport(session, device, mainStreamUrl, subStreamUrl)
-                return awaitLoadedEntry(session, device, outcome)
+                return try {
+                    val outcome = sendImport(session, device, mainStreamUrl, subStreamUrl)
+                    awaitLoadedEntry(session, device, outcome)
+                } catch (exception: HomeAssistantException) {
+                    if (exception.error != HomeAssistantError.UNKNOWN_COMMAND) throw exception
+                    // Stock tuya-local does not register tuya_local/import_device; drive its standard REST config flow.
+                    importViaConfigFlow(session, device)
+                }
             }
         }
+    }
+
+    private fun importViaConfigFlow(session: WebSocketSession, device: ActivatedDevice): ImportResult {
+        val host = device.ip?.trim()?.takeIf { it.isNotEmpty() }
+            ?: throw HomeAssistantException(
+                HomeAssistantError.DISCOVERY_FAILED,
+                "Could not find the device on the local network. Check that it is powered on and on the same Wi-Fi."
+            )
+        val protocolVersion = device.protocolVersion?.trim()
+            ?.takeIf { HomeAssistantProtocol.isSupportedProtocolVersion(it) }
+            ?: "auto"
+        val existingId = findTuyaLocalEntryId(session, device)
+        if (existingId != null) {
+            updateTuyaLocalOptions(existingId, host, device.localKey, protocolVersion)
+            session.callCommand("config_entries/update", mapOf("entry_id" to existingId, "title" to device.name))
+            return awaitLoadedEntry(session, device, ImportOutcome.UPDATED)
+        }
+        var step = postFlow("/api/config/config_entries/flow", mapOf("handler" to "tuya_local"))
+        val flowId = step.getString("flow_id")
+            ?: throw invalidResponse("Home Assistant returned no Tuya Local flow ID.")
+        val flowPath = "/api/config/config_entries/flow/$flowId"
+        if (step.getString("type") == "form" && step.getString("step_id") == "user") {
+            step = postFlow(flowPath, mapOf("setup_mode" to "manual"))
+        }
+        requireFlowStep(step, "local")
+        step = postFlow(
+            flowPath,
+            mapOf(
+                "device_id" to device.deviceId,
+                "host" to host,
+                "local_key" to device.localKey,
+                "protocol_version" to protocolVersion,
+                "poll_only" to false
+            )
+        )
+        if (step.getString("type") == "abort") {
+            if (step.getString("reason") == "not_supported") {
+                throw HomeAssistantException(
+                    HomeAssistantError.UNSUPPORTED_PROFILE,
+                    "The device profile is not supported by Tuya Local."
+                )
+            }
+            throw flowFailure(step)
+        }
+        val stepId = step.getString("step_id")
+        if (step.getString("type") != "form" ||
+            (stepId != "select_type" && stepId != "select_type_auto_detected")
+        ) {
+            throw flowFailure(step)
+        }
+        val selectedType = extractDefaultType(step)
+            ?: throw HomeAssistantException(
+                HomeAssistantError.UNSUPPORTED_PROFILE,
+                "Tuya Local offered no matching device profile."
+            )
+        step = postFlow(flowPath, mapOf("type" to selectedType))
+        requireFlowStep(step, "choose_entities")
+        val choosePayload = linkedMapOf<String, Any?>("name" to device.name)
+        val schema = step.getJSONArray("data_schema")
+        if (schema != null) {
+            for (index in 0 until schema.size) {
+                val field = schema.getJSONObject(index) ?: continue
+                val fieldName = field.getString("name") ?: continue
+                if (fieldName != "name" && field.containsKey("default")) {
+                    choosePayload[fieldName] = field.get("default")
+                }
+            }
+        }
+        val created = postFlow(flowPath, choosePayload)
+        if (created.getString("type") != "create_entry") {
+            throw flowFailure(created)
+        }
+        return awaitLoadedEntry(session, device, ImportOutcome.ADDED)
+    }
+
+    private fun findTuyaLocalEntryId(session: WebSocketSession, device: ActivatedDevice): String? {
+        val response = session.callCommand("config_entries/get")
+        val entries = response.getJSONArray("result")
+            ?: throw invalidResponse("Home Assistant returned no config-entry list.")
+        for (index in 0 until entries.size) {
+            val entry = entries.getJSONObject(index)
+            if (entry.getString("domain") != "tuya_local") continue
+            val uniqueId = entry.getString("unique_id")
+            if (uniqueId == device.deviceId) {
+                return entry.getString("entry_id")
+            }
+        }
+        return null
+    }
+
+    private fun updateTuyaLocalOptions(
+        entryId: String,
+        host: String,
+        localKey: String,
+        protocolVersion: String
+    ) {
+        val start = postFlow("/api/config/config_entries/options/flow", mapOf("handler" to entryId))
+        requireFlowStep(start, "user")
+        val flowId = start.getString("flow_id")
+            ?: throw invalidResponse("Home Assistant returned no Tuya Local options flow ID.")
+        val result = postFlow(
+            "/api/config/config_entries/options/flow/$flowId",
+            mapOf(
+                "local_key" to localKey,
+                "host" to host,
+                "protocol_version" to protocolVersion,
+                "poll_only" to false
+            )
+        )
+        if (result.getString("type") != "create_entry") {
+            throw flowFailure(result)
+        }
+    }
+
+    private fun extractDefaultType(step: JSONObject): String? {
+        val schema = step.getJSONArray("data_schema") ?: return null
+        for (index in 0 until schema.size) {
+            val field = schema.getJSONObject(index) ?: continue
+            if (field.getString("name") != "type") continue
+            field.getString("default")?.takeIf { it.isNotBlank() }?.let { return it }
+            val options = field.getJSONObject("selector")
+                ?.getJSONObject("select")
+                ?.getJSONArray("options")
+            if (options != null && options.isNotEmpty()) {
+                val first = options.get(0)
+                if (first is JSONObject) {
+                    return first.getString("value")
+                }
+                if (first is String) {
+                    return first
+                }
+            }
+        }
+        return null
     }
 
     fun configureTuyaStreams(deviceId: String, mainStreamUrl: String?, subStreamUrl: String?): String {
@@ -582,7 +722,7 @@ internal object HomeAssistantProtocol {
         return payload
     }
 
-    private fun isRfc1918Address(value: String): Boolean {
+    fun isRfc1918Address(value: String): Boolean {
         val parts = value.split('.')
         if (parts.size != 4) return false
         val octets = parts.map { part ->
@@ -595,6 +735,9 @@ internal object HomeAssistantProtocol {
             (octets[0] == 172 && octets[1] in 16..31) ||
             (octets[0] == 192 && octets[1] == 168)
     }
+
+    fun isSupportedProtocolVersion(value: String): Boolean =
+        SUPPORTED_PROTOCOL_VERSION.matches(value)
 
     private val SUPPORTED_PROTOCOL_VERSION = Regex("3\\.\\d+")
 }
