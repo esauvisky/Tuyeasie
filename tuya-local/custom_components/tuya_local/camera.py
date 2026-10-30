@@ -56,6 +56,7 @@ class TuyaLocalCamera(TuyaLocalEntity, CameraEntity):
             self._attr_supported_features |= CameraEntityFeature.ON_OFF
         if self._stream_url:
             self._attr_supported_features |= CameraEntityFeature.STREAM
+            self.stream_options["rtsp_transport"] = "tcp"
 
     @staticmethod
     def _resolve_stream_url(
@@ -75,7 +76,7 @@ class TuyaLocalCamera(TuyaLocalEntity, CameraEntity):
     def use_stream_for_stills(self) -> bool:
         return bool(self._stream_url)
 
-    async def async_stream_source(self) -> str | None:
+    async def stream_source(self) -> str | None:
         """Return the RTSP stream source if configured."""
         return self._stream_url
 
