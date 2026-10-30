@@ -39,9 +39,13 @@ class CameraOnvifRepository {
         val address: String
         try {
             publish(sdkDevice, "ONVIF static IP (DP 241)", """{"241":"1"}""")
-            changePassword(sdkDevice, oldPassword, password, savePassword)
-            Log.d(TAG, "DP238 confirmed res=ok, enabling ONVIF switch")
+            // Turn ONVIF off and back on first with a settle delay so the camera starts its ONVIF service cleanly.
+            publish(sdkDevice, "ONVIF switch off (DP 237)", """{"237":false}""")
+            delay(1500)
             publish(sdkDevice, "ONVIF switch (DP 237)", """{"237":true}""")
+            delay(1500)
+            changePassword(sdkDevice, oldPassword, password, savePassword)
+            Log.d(TAG, "DP238 confirmed res=ok, verifying ONVIF state")
             address = verifyState(sdkDevice)
         } catch (e: CameraOnvifException) {
             if (existingPassword != null) throw e

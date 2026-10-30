@@ -1097,7 +1097,7 @@ private fun DoneStep(
     if (state.pendingDevice?.state == ImportState.PENDING || state.connectionError != null) {
         SecondaryAction("Home Assistant settings", onBackToConnection)
     }
-    if (state.openedFromDeviceSettings) {
+    if (state.openedFromDeviceSettings || state.onvifStatus == OnvifStatus.COMPLETE) {
         OnvifCard(state, clipboard, onRetryOnvif, onToggleOnvifPassword, onRetryStreams, device.deviceId.isNotBlank())
     }
     DisclosureSection(title = "View saved credentials") {
@@ -1256,7 +1256,7 @@ private fun StreamRegistrationStatus(state: OnboardingUiState, onRetryStreams: (
         return
     }
     when (state.streamStatus) {
-        StreamStatus.IDLE -> SecondaryAction("Register streams in Home Assistant", onRetryStreams)
+        StreamStatus.IDLE -> SecondaryAction("Choose stream destination", onRetryStreams)
         StreamStatus.REGISTERING -> StatusBanner("Registering camera streams in Home Assistant…", busy = true)
         StreamStatus.FAILED, StreamStatus.COMPLETE -> {
             Text(
@@ -1273,6 +1273,7 @@ private fun StreamRegistrationStatus(state: OnboardingUiState, onRetryStreams: (
                 SecondaryAction("Retry stream registration", onRetryStreams)
             } else {
                 SuccessBanner("Both streams are registered in Home Assistant.")
+                SecondaryAction("Change stream destination", { onRetryStreams() })
             }
         }
     }

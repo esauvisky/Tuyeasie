@@ -973,7 +973,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 step = WizardStep.ACTIVATE,
                 activatedDevice = device,
                 activationStatus = ActivationStatus.IMPORTING,
-                activationProgress = "Device activated. Configuring ONVIF (attempt 1 of 2)…",
+                activationProgress = "Device activated. Configuring ONVIF…",
                 activationError = null,
                 importResult = null
             ).withoutCameraState()
@@ -987,13 +987,6 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
             if (onvifConfigured == null && device.deviceId.isNotBlank()) {
                 for (attempt in 1..2) {
                     if (generation != importGeneration.get()) return@launch
-                    update {
-                        copy(
-                            activationProgress = if (attempt == 1)
-                                "Device activated. Configuring ONVIF (attempt 1 of 2)…"
-                            else "ONVIF setup failed, retrying (attempt 2 of 2)…"
-                        )
-                    }
                     val existingPassword = withContext(Dispatchers.IO) {
                         store.loadOnvifRecord(device.deviceId)?.password
                             ?: store.loadPendingOnvifPassword(device.deviceId)
@@ -1008,7 +1001,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                         onvifConfigured = record
                         break
                     } catch (_: CameraOnvifException) {
-                        // Try up to 2 times during registration; if both fail, add the device anyway.
+                        // Try up to 2 times silently during registration; if both fail, add the device anyway.
                     }
                 }
             }
@@ -1031,64 +1024,17 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 ip = existingLanIp ?: lanDiscovered?.ip ?: device.ip,
                 protocolVersion = existingLanProto ?: lanDiscovered?.protocolVersion ?: device.protocolVersion
             )
-            val mainStreamUrl = onvifConfigured?.let { authenticatedUrl(it.mainUrl, it.password) }
-            val subStreamUrl = onvifConfigured?.let { authenticatedUrl(it.subUrl, it.password) }
             try {
                 val result = withContext(Dispatchers.IO) {
                     store.savePendingDevice(deviceForImport)
-                    homeAssistantClient.importDevice(deviceForImport, mainStreamUrl, subStreamUrl)
+                    homeAssistantClient.importDevice(deviceForImport)
                 }
                 if (generation != importGeneration.get()) return@launch
                 check(result.loaded) { "Home Assistant returned an unloaded import result" }
                 val imported = PendingDeviceRecord(deviceForImport, ImportState.IMPORTED, null)
-                var registeredOnvif: OnvifRecord? = null
-                var mainId: String? = null
-                var subId: String? = null
-                if (onvifConfigured != null) {
-                    update { copy(activationProgress = "Registering ONVIF camera streams in Home Assistant…") }
-                    try {
-                        val entryId = withContext(Dispatchers.IO) {
-                            homeAssistantClient.configureTuyaStreams(
-                                deviceForImport.deviceId,
-                                mainStreamUrl,
-                                subStreamUrl
-                            )
-                        }
-                        mainId = entryId
-                        subId = entryId
-                        registeredOnvif = onvifConfigured.copy(
-                            destination = StreamDestination.TUYA_LOCAL.storedName,
-                            registered = true
-                        )
-                    } catch (exception: HomeAssistantException) {
-                        if (exception.error != HomeAssistantError.UNKNOWN_COMMAND) throw exception
-                        // Stock tuya-local does not expose tuya_local/configure_streams; register via Generic Camera.
-                        mainId = withContext(Dispatchers.IO) {
-                            homeAssistantClient.createCamera(
-                                "${deviceForImport.name} Main",
-                                onvifConfigured.mainUrl,
-                                ONVIF_USERNAME,
-                                onvifConfigured.password
-                            )
-                        }
-                        subId = withContext(Dispatchers.IO) {
-                            homeAssistantClient.createCamera(
-                                "${deviceForImport.name} Substream",
-                                onvifConfigured.subUrl,
-                                ONVIF_USERNAME,
-                                onvifConfigured.password
-                            )
-                        }
-                        registeredOnvif = onvifConfigured.copy(
-                            destination = StreamDestination.GENERIC_CAMERA.storedName,
-                            registered = true
-                        )
-                    }
-                }
                 withContext(Dispatchers.IO) {
                     if (generation == importGeneration.get()) {
                         store.savePendingDevice(imported)
-                        if (registeredOnvif != null) store.saveOnvifRecord(registeredOnvif)
                     }
                 }
                 if (generation != importGeneration.get()) return@launch
@@ -1101,14 +1047,13 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                         activationStatus = ActivationStatus.COMPLETE,
                         activationProgress = null,
                         activationError = null,
-                        onvifRecord = registeredOnvif ?: onvifConfigured,
+                        onvifRecord = onvifConfigured,
                         onvifStatus = if (onvifConfigured != null) OnvifStatus.COMPLETE else OnvifStatus.IDLE,
-                        streamDestination = registeredOnvif?.destination?.let { dest ->
-                            StreamDestination.entries.first { it.storedName == dest }
-                        },
-                        streamStatus = if (registeredOnvif != null) StreamStatus.COMPLETE else StreamStatus.IDLE,
-                        mainEntryId = mainId,
-                        subEntryId = subId
+                        streamDestination = StreamDestination.TUYA_LOCAL,
+                        showDestinationDialog = onvifConfigured != null && connectionVerified,
+                        streamStatus = StreamStatus.IDLE,
+                        mainEntryId = null,
+                        subEntryId = null
                     )
                 }
             } catch (exception: HomeAssistantException) {
@@ -1184,22 +1129,13 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         }
         withContext(Dispatchers.IO) { store.saveOnvifRecord(configured) }
         if (generation != importGeneration.get()) return
-        if (current.connectionVerified) {
-            update {
-                copy(
-                    onvifStatus = OnvifStatus.COMPLETE,
-                    onvifRecord = configured,
-                    streamDestination = StreamDestination.TUYA_LOCAL
-                )
-            }
-            registerStreams()
-        } else {
-            update {
-                copy(
-                    onvifStatus = OnvifStatus.COMPLETE,
-                    onvifRecord = configured
-                )
-            }
+        update {
+            copy(
+                onvifStatus = OnvifStatus.COMPLETE,
+                onvifRecord = configured,
+                streamDestination = streamDestination ?: StreamDestination.TUYA_LOCAL,
+                showDestinationDialog = connectionVerified
+            )
         }
     }
 
@@ -1233,8 +1169,13 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun retryStreamRegistration() {
-        if (current.streamStatus == StreamStatus.IDLE) {
-            update { copy(showDestinationDialog = true) }
+        if (current.streamStatus == StreamStatus.IDLE || current.streamStatus == StreamStatus.COMPLETE) {
+            update {
+                copy(
+                    streamDestination = streamDestination ?: StreamDestination.TUYA_LOCAL,
+                    showDestinationDialog = true
+                )
+            }
             return
         }
         registerStreams()
