@@ -1,3 +1,9 @@
+import com.android.build.api.artifact.ScopedArtifact
+import com.android.build.api.variant.ScopedArtifacts
+import java.util.jar.JarOutputStream
+import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
+
 plugins {
     id 'com.android.application'
     id 'org.jetbrains.kotlin.android'
@@ -63,6 +69,65 @@ android {
             useLegacyPackaging true
             pickFirsts += '**/libthing_security.so'
         }
+    }
+}
+
+// The app ships its own com.thingclips.smart.security.jni classes. Debug dexing keeps app and library
+// dex files apart, so the app copy wins by load order; release merges everything, so the SDK copy must go.
+abstract class DropSdkSecurityJniTask extends DefaultTask {
+    static final Set<String> OVERRIDDEN = [
+        'com/thingclips/smart/security/jni/JNICLibrary.class',
+        'com/thingclips/smart/security/jni/SecureNativeApi.class'
+    ] as Set
+
+    @InputFiles
+    abstract ListProperty<RegularFile> getAllJars()
+
+    @InputFiles
+    abstract ListProperty<Directory> getAllDirectories()
+
+    @OutputFile
+    abstract RegularFileProperty getOutput()
+
+    @TaskAction
+    void run() {
+        def dropped = new HashSet<String>()
+        new JarOutputStream(output.get().asFile.newOutputStream()).withCloseable { out ->
+            allDirectories.get().each { directory ->
+                def root = directory.asFile
+                root.eachFileRecurse(groovy.io.FileType.FILES) { file ->
+                    out.putNextEntry(new ZipEntry(root.toPath().relativize(file.toPath()).toString().replace(File.separatorChar, '/' as char)))
+                    file.withInputStream { out << it }
+                    out.closeEntry()
+                }
+            }
+            allJars.get().each { jar ->
+                new ZipFile(jar.asFile).withCloseable { zip ->
+                    zip.entries().each { entry ->
+                        if (entry.directory || entry.name.startsWith('META-INF/') || entry.name == 'module-info.class') return
+                        if (OVERRIDDEN.contains(entry.name)) {
+                            dropped.add(entry.name)
+                            return
+                        }
+                        out.putNextEntry(new ZipEntry(entry.name))
+                        zip.getInputStream(entry).withCloseable { out << it }
+                        out.closeEntry()
+                    }
+                }
+            }
+        }
+        if (dropped != OVERRIDDEN) {
+            throw new GradleException("Expected the Tuya SDK to define ${OVERRIDDEN - dropped}")
+        }
+    }
+}
+
+androidComponents {
+    onVariants(selector().withBuildType('release')) { variant ->
+        def task = project.tasks.register("${variant.name}DropSdkSecurityJni", DropSdkSecurityJniTask)
+        variant.artifacts.forScope(ScopedArtifacts.Scope.ALL)
+            .use(task)
+            .toTransform(ScopedArtifact.CLASSES.INSTANCE, { it.allJars }, { it.allDirectories }, { it.output })
     }
 }
 
