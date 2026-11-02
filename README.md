@@ -22,7 +22,6 @@ Tuyeasie pairs Tuya devices from an Android phone, extracts their local credenti
 
 - `android/`: native Kotlin and Jetpack Compose application.
 - `tuya-local/`: extended Home Assistant integration and device profiles.
-- `docs/`: product design and implementation plans.
 
 ## Build the Android app
 
