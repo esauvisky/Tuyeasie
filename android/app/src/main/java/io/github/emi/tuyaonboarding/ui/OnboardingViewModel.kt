@@ -86,6 +86,7 @@ enum class StreamDestination(val storedName: String) {
 }
 
 private const val ONVIF_USERNAME = "admin"
+private const val CAMERA_CATEGORY = "sp"
 private const val NETWORK_SCAN_SETTLE_MILLIS = 4_000L
 
 data class OnboardingUiState(
@@ -968,12 +969,14 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     private fun importDevice(device: ActivatedDevice) {
         if (current.activationStatus == ActivationStatus.IMPORTING) return
         val generation = importGeneration.incrementAndGet()
+        val isCamera = device.category == CAMERA_CATEGORY
         update {
             copy(
                 step = WizardStep.ACTIVATE,
                 activatedDevice = device,
                 activationStatus = ActivationStatus.IMPORTING,
-                activationProgress = "Device activated. Configuring ONVIF…",
+                activationProgress = if (isCamera) "Device activated. Configuring ONVIF…"
+                else "Device activated. Importing it into Home Assistant…",
                 activationError = null,
                 importResult = null
             ).withoutCameraState()
@@ -984,7 +987,8 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
             var onvifConfigured: OnvifRecord? = withContext(Dispatchers.IO) {
                 store.loadOnvifRecord(device.deviceId)
             }
-            if (onvifConfigured == null && device.deviceId.isNotBlank()) {
+            var onvifFailure: CameraOnvifException? = null
+            if (isCamera && onvifConfigured == null && device.deviceId.isNotBlank()) {
                 for (attempt in 1..2) {
                     if (generation != importGeneration.get()) return@launch
                     val existingPassword = withContext(Dispatchers.IO) {
@@ -999,9 +1003,11 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                         }
                         withContext(Dispatchers.IO) { store.saveOnvifRecord(record) }
                         onvifConfigured = record
+                        onvifFailure = null
                         break
-                    } catch (_: CameraOnvifException) {
-                        // Try up to 2 times silently during registration; if both fail, add the device anyway.
+                    } catch (exception: CameraOnvifException) {
+                        // Try up to 2 times during registration; if both fail, add the device anyway and show why.
+                        onvifFailure = exception
                     }
                 }
             }
@@ -1038,6 +1044,18 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                     }
                 }
                 if (generation != importGeneration.get()) return@launch
+                val pendingOnvifPassword = withContext(Dispatchers.IO) {
+                    store.loadPendingOnvifPassword(device.deviceId)
+                }
+                val onvifError = onvifFailure?.let { failure ->
+                    sanitizeError(
+                        checkNotNull(failure.message),
+                        current.settings,
+                        deviceForImport,
+                        pendingOnvifPassword,
+                        *accountSecrets()
+                    )
+                }
                 update {
                     copy(
                         step = WizardStep.DONE,
@@ -1048,7 +1066,12 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                         activationProgress = null,
                         activationError = null,
                         onvifRecord = onvifConfigured,
-                        onvifStatus = if (onvifConfigured != null) OnvifStatus.COMPLETE else OnvifStatus.IDLE,
+                        onvifStatus = when {
+                            onvifConfigured != null -> OnvifStatus.COMPLETE
+                            onvifFailure != null -> OnvifStatus.FAILED
+                            else -> OnvifStatus.IDLE
+                        },
+                        onvifError = onvifError,
                         streamDestination = StreamDestination.TUYA_LOCAL,
                         showDestinationDialog = onvifConfigured != null && connectionVerified,
                         streamStatus = StreamStatus.IDLE,

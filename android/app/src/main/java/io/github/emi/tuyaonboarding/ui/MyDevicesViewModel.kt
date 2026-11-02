@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.emi.tuyaonboarding.data.SavedTuyaAccount
 import io.github.emi.tuyaonboarding.data.SecureSettingsStore
+import io.github.emi.tuyaonboarding.data.TuyaAccountKind
 import io.github.emi.tuyaonboarding.data.TuyaAccountRepository
 import io.github.emi.tuyaonboarding.data.TuyaManagedDevice
 import io.github.emi.tuyaonboarding.data.TuyaSdkException
@@ -100,15 +101,15 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
         val state = _uiState.value
         check(!state.adding) { "Add account already in progress" }
         val email = state.addEmail.trim()
+        if (repository.savedAccounts().any { it.kind == TuyaAccountKind.USER }) {
+            _uiState.update { it.copy(addError = "A user account is already saved. Forget it first to switch accounts.") }
+            return
+        }
         _uiState.update { it.copy(adding = true, addError = null) }
         viewModelScope.launch {
             try {
                 sdkLock.withLock { repository.addAccount(email, state.addPassword) }
             } catch (e: TuyaSdkException) {
-                _uiState.update { it.copy(adding = false, addError = e.message) }
-                return@launch
-            } catch (e: IllegalStateException) {
-                // addAccount's own duplicate-account check; user-correctable input error
                 _uiState.update { it.copy(adding = false, addError = e.message) }
                 return@launch
             }

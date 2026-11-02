@@ -100,6 +100,8 @@ object TuyaLanScanner {
                 val decrypted = if (payload.isNotEmpty() && payload[0] == '{'.code.toByte()) {
                     payload
                 } else {
+                    // Any LAN host can send to these ports; a payload that is not whole AES blocks is not a Tuya broadcast.
+                    if (payload.isEmpty() || payload.size % 16 != 0) return null
                     val cipher = Cipher.getInstance("AES/ECB/NoPadding")
                     cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(UDP_KEY, "AES"))
                     cipher.doFinal(payload)

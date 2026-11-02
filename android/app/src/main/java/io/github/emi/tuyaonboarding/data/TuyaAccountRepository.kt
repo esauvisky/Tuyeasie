@@ -60,17 +60,17 @@ class TuyaAccountRepository(context: Context, private val store: SecureSettingsS
         signIn(account)
         return homes().flatMap { home ->
             homeDetail(home.homeId).deviceList.orEmpty().map {
-                val deviceId = it.devId.orEmpty()
-                val name = it.name.orEmpty()
-                val productId = it.productId.orEmpty()
+                val deviceId: String = it.devId
+                val name: String = it.name
+                val productId: String = it.productId
                 TuyaManagedDevice(
                     deviceId = deviceId,
                     name = name,
                     productId = productId,
-                    homeName = home.name.orEmpty(),
+                    homeName = home.name,
                     activated = ActivatedDevice(
                         deviceId = deviceId,
-                        localKey = it.localKey.orEmpty(),
+                        localKey = it.localKey,
                         name = name,
                         productId = productId,
                         protocolVersion = it.pv,

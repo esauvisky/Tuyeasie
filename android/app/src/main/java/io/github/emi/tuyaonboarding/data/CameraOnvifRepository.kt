@@ -6,6 +6,7 @@ import com.thingclips.smart.home.sdk.ThingHomeSdk
 import com.thingclips.smart.sdk.api.IDevListener
 import com.thingclips.smart.sdk.api.IResultCallback
 import com.thingclips.smart.sdk.api.IThingDevice
+import io.github.emi.tuyaonboarding.hass.HomeAssistantProtocol
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.net.InetSocketAddress
@@ -124,6 +125,8 @@ class CameraOnvifRepository {
         }
         sdkDevice.registerDevListener(listener)
         try {
+            // Persist before sending: a publish that errors or times out may still have been applied by the camera.
+            savePassword(password)
             publish(
                 sdkDevice,
                 "ONVIF password (DP 238)",
@@ -133,7 +136,6 @@ class CameraOnvifRepository {
                     )
                 )
             )
-            savePassword(password)
             awaitCallback("ONVIF password read (DP 238)") { callback -> sdkDevice.getDpList(listOf("238"), callback) }
             try {
                 withTimeout(SDK_TIMEOUT_MS) { result.await() }
@@ -188,7 +190,7 @@ class CameraOnvifRepository {
                 Log.d(TAG, "verify update: 237=${seen["237"]} 239=${seen["239"]} 240=${seen["240"]}")
                 if (seen["237"] == true && seen["239"] == true) {
                     val ip = seen["240"] as? String
-                    if (ip != null && isPrivateIpv4(ip)) result.complete(ip)
+                    if (ip != null && HomeAssistantProtocol.isRfc1918Address(ip)) result.complete(ip)
                 }
             }
 
@@ -238,16 +240,6 @@ class CameraOnvifRepository {
             awaitCallback(stage) { callback -> sdkDevice.getDpList(listOf("237", "239", "240"), callback) }
             delay(2000)
         }
-    }
-
-    private fun isPrivateIpv4(value: String): Boolean {
-        val parts = value.split(".")
-        if (parts.size != 4) return false
-        val octets = parts.map { it.toIntOrNull() ?: return false }
-        if (octets.any { it !in 0..255 }) return false
-        return octets[0] == 10 ||
-            (octets[0] == 172 && octets[1] in 16..31) ||
-            (octets[0] == 192 && octets[1] == 168)
     }
 
     private fun describe(address: String, url: String, password: String, path: String): StreamInfo {
