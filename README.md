@@ -1,28 +1,46 @@
 # Tuyeasie
 
-Local-first Tuya device onboarding for Home Assistant.
+Tuyeasie pairs a Tuya device from an Android phone and adds it to Home Assistant. You put the device in pairing mode, tap it, and it shows up in the Tuya Local integration with its local key. You do not need the Smart Life app for a normal plug, bulb, or sensor.
 
-Tuyeasie pairs Tuya devices from an Android phone, extracts their local credentials, and imports them into the included `tuya-local` integration. It supports Wi-Fi access-point provisioning and Bluetooth-assisted pairing for Wi-Fi + BLE combo devices, without requiring the official Tuya app for normal setup.
+[Pairing a camera into Home Assistant](demo/pairing.mp4) (1m18s, played at double speed).
 
-[Pairing a camera into Home Assistant](demo/pairing.mp4) (1m18s, played at double speed). The clip starts on the Pair tab, pairs a camera over Bluetooth, and ends on the device page in Home Assistant with the Tuya Local controls.
+## Download
 
-## Features
+The app is not on the Play Store. Download the APK from [GitHub Releases](https://github.com/esauvisky/Tuyeasie/releases) and install it. Android will ask you to allow installs from the browser.
 
-- Pair, Devices and Settings tabs. Home Assistant and Wi-Fi are entered once, then pairing is scan and tap.
-- Combined Wi-Fi hotspot and Bluetooth device discovery, with product names and icons.
-- AP and Bluetooth activation. Cameras use a saved Tuya account. Other devices use a generated one.
-- Authenticated `tuya-local` import, with the entry checked against Home Assistant's device registry.
-- Encrypted storage for Home Assistant, Wi-Fi, Tuya and device credentials.
-- Camera ONVIF setup on the account that owns the camera: the password is set before ONVIF is enabled, then the IP mode is toggled and restored so the camera starts RTSP. The factory password is `admin`.
-- Main and substream registration on the Tuya Local device, with Generic Camera or go2rtc as alternatives.
-- Local camera controls through the included PTZ camera profile.
+The newest release is [v0.1.0](https://github.com/esauvisky/Tuyeasie/releases/tag/v0.1.0). The pairing screen in the video is newer than that APK and is only on `main` until the next release tag.
 
-## Repository layout
+## Set it up
 
-- `android/`: native Kotlin and Jetpack Compose application.
-- `tuya-local/`: extended Home Assistant integration and device profiles.
+1. In Home Assistant, install Tuya Local. Stock Tuya Local is enough for plugs, bulbs, and sensors. Cameras need the patched copy, below.
+2. Create an administrator long-lived access token: your Home Assistant profile, Security, Create token.
+3. In the app, open Settings. Enter the Home Assistant URL (for example `http://homeassistant.local:8123`), the token, and the 2.4 GHz Wi-Fi the device should join.
+4. Open Pair. Reset the device until its light blinks fast, then tap it.
 
-## Build the Android app
+The phone and Home Assistant have to be on the same network. Pairing needs internet. After that, control of the device is local.
+
+## Limitations
+
+- Android only.
+- The device must be put in pairing mode. A device already in Smart Life has to be removed there first, which gives it a new local key.
+- Cameras pair to a Tuya account you type in. If you lose that email and password, the camera cannot be paired again without a factory reset.
+- A camera's ONVIF password starts as `admin`. The app replaces it with a generated one and stores it on the phone. A reboot does not clear it. Only a factory reset puts `admin` back, and that unpairs the camera.
+- Tuya devices accept one local connection. Turning ONVIF on toggles the camera's IP mode, so its address can change. The app updates Tuya Local when it does.
+- With stock Tuya Local, a camera's video is added as separate Generic Camera entries. The picture and the pan controls are not on the same device.
+
+## Tuya security cameras
+
+A camera's video only appears on its Tuya Local device if Home Assistant is running the patched integration from this repository. That copy adds the stream URLs to the device, so the main stream, the substream, and the controls (pan, privacy, motion) are one device. Stock Tuya Local does not have this, and the app falls back to Generic Camera.
+
+Install the patched copy over the one you already have:
+
+1. Copy `tuya-local/custom_components/tuya_local` from this repository to `config/custom_components/tuya_local` on the Home Assistant machine.
+2. Restart Home Assistant.
+3. Pair the camera in the app. ONVIF is set up during pairing. The username is `admin`.
+
+The patched integration is based on tuya-local 2026.10.0. It keeps that project's license, in `tuya-local/LICENSE.md`.
+
+## Build
 
 Requirements: JDK 17, Android SDK 35, and a Tuya Smart Life App SDK key.
 
@@ -33,28 +51,13 @@ appKey=your_tuya_app_key
 appSecret=your_tuya_app_secret
 ```
 
-Then run:
-
 ```bash
 cd android
 ./gradlew assembleDebug
-```
-
-Install on a connected device:
-
-```bash
 ./gradlew installDebug
 ```
 
-`local.properties`, signing material, build output, and virtual environments are not committed.
-
-## Releases
-
-Pushing a `v*` tag whose commit is contained in `main` builds, signs, and attaches the APK to a GitHub Release. The workflow requires the repository secrets documented in `.github/workflows/release.yml`.
-
-## Home Assistant
-
-The app expects a Home Assistant administrator long-lived access token and the extended `tuya-local` integration from this repository. Day-to-day device control after import is local; activation and camera stream registration can require internet access.
+`local.properties`, signing material, and build output are not committed. Pushing a `v*` tag on `main` builds, signs, and attaches the APK to a GitHub Release. The workflow secrets are listed in `.github/workflows/release.yml`.
 
 ## License
 
