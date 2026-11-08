@@ -2,18 +2,16 @@
 
 Tuya will sell you a plug, then charge you a developer account, a cloud project, and a support ticket before it admits the thing has a local key. Tuyeasie skips that. Pair the device from your phone and it lands in Home Assistant, key included. No Smart Life account, no IoT portal, no `tinytuya wizard`.
 
-[Pairing a device](demo/pairing.mp4) (1m18s, played at double speed).
+https://github.com/user-attachments/assets/12284b7a-01b0-45f3-916b-752d80196c42
 
 ## Download
 
-Not on the Play Store. Grab the APK from [GitHub Releases](https://github.com/esauvisky/Tuyeasie/releases) and install it. Android will complain about the browser. Let it.
-
-The published APK is still [v0.1.0](https://github.com/esauvisky/Tuyeasie/releases/tag/v0.1.0). Version 1.0.0 is on `main` and ships when a `v1.0.0` tag is pushed.
+Grab the APK from [GitHub Releases](https://github.com/esauvisky/Tuyeasie/releases) and install it.
 
 ## Set it up
 
 1. Install [Tuya Local](https://github.com/make-all/tuya-local) in Home Assistant. The stock one is what you want for plugs, bulbs, and sensors.
-2. Make an administrator long-lived access token. Profile, Security, Create token.
+2. Make an administrator long-lived access token.
 3. In the app, open Settings. Home Assistant URL, the token, and the 2.4 GHz Wi-Fi the device should join.
 4. Open Pair. Reset the device until it blinks fast, then tap it.
 
@@ -21,20 +19,19 @@ The phone and Home Assistant need to be on the same network. Pairing uses the in
 
 ## Limitations
 
-- Android only. Someone has to hold the phone next to the device.
-- The device has to be in pairing mode. If it already lives in Smart Life, remove it there first. That also mints a new local key, which is Tuya's idea of loyalty.
-- Tuya devices take one local connection. A second integration talking to the same device will lose.
-- Cameras are the awkward ones. They pair to a Tuya account you type in, and ONVIF keeps its own password. Lose either and the camera wants a factory reset. Details at the bottom.
+- Android only.
+- The device has to be in pairing mode. If it already lives in Smart Life, remove it there first.
+- Someone has to hold the phone next to the device.
 
 ## Tuya security cameras
 
-Stock Tuya Local will take the camera and its controls. It will not play the video on that same device. This repo carries a patched copy that does: main stream, substream, and the pan controls, one device.
+Stock Tuya Local will take the camera and its controls, but it will not play the video on that same HASS device. This repo contains a patched copy of Tuya Local that does: main stream, substream, and the pan controls, all in one device.
 
 1. Copy `tuya-local/custom_components/tuya_local` to `config/custom_components/tuya_local` on the Home Assistant machine, over the copy you have.
 2. Restart Home Assistant.
 3. Pair the camera in the app.
 
-The username is `admin`. The patched integration is tuya-local 2026.10.0 plus the stream wiring, and it keeps that project's license in `tuya-local/LICENSE.md`. Without the patch the app still adds the video, as separate Generic Camera entries.
+The username is `admin`. The patched integration is tuya-local 2026.10.0 plus the stream wiring, and it keeps that project's license in `tuya-local/LICENSE.md`. Without the patch the app still adds the video but as separate Generic Camera entries.
 
 ## Build
 
@@ -63,16 +60,12 @@ keyAlias=tuyeasie
 keyPassword=your_key_password
 ```
 
-`./gradlew assembleRelease` signs with that file when it exists and builds an unsigned APK when it does not. CI does the same thing: the keystore is stored base64 in the `ANDROID_KEYSTORE_BASE64` secret, with `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`. The release workflow writes `keystore.properties` from those and runs the same Gradle task. One key, two places, nothing committed.
-
 ```bash
 cd android
 ./gradlew assembleDebug
 ./gradlew installDebug
 ```
 
-Pushing a `v*` tag on `main` builds the signed APK and attaches it to a GitHub Release.
-
 ## License
 
-[MIT](LICENSE). The bundled tuya-local keeps its own license, in `tuya-local/LICENSE.md`.
+[MIT](LICENSE).
