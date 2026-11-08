@@ -25,13 +25,14 @@ import io.github.emi.tuyaonboarding.data.TuyaAccount
 import io.github.emi.tuyaonboarding.data.TuyaActivationRepository
 import io.github.emi.tuyaonboarding.data.TuyaBleDevice
 import io.github.emi.tuyaonboarding.data.TuyaHotspot
+import io.github.emi.tuyaonboarding.data.TuyaAccountRepository
 import io.github.emi.tuyaonboarding.data.TuyaLanScanner
+import io.github.emi.tuyaonboarding.data.TuyaSdkException
 import io.github.emi.tuyaonboarding.hass.Go2RtcClient
 import io.github.emi.tuyaonboarding.hass.HomeAssistantClient
 import io.github.emi.tuyaonboarding.hass.HomeAssistantError
 import io.github.emi.tuyaonboarding.hass.HomeAssistantException
 import io.github.emi.tuyaonboarding.hass.HomeAssistantProtocol
-import io.github.emi.tuyaonboarding.hass.ImportResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -39,11 +40,10 @@ import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicLong
 
-enum class WizardStep(val title: String) {
-    CONNECT("Connect"),
-    HOTSPOT("Hotspot"),
-    ACTIVATE("Activate"),
-    DONE("Done")
+enum class PairStage {
+    SETUP,
+    NEARBY,
+    PAIRING
 }
 
 enum class HotspotStatus {
@@ -61,7 +61,6 @@ enum class ActivationStatus {
     ACTIVATING,
     IMPORTING,
     FAILED,
-    IMPORT_FAILED,
     COMPLETE
 }
 
@@ -85,17 +84,31 @@ enum class StreamDestination(val storedName: String) {
     GO2RTC("go2rtc")
 }
 
+data class AddedDevice(
+    val name: String,
+    val homeAssistantUrl: String
+)
+
 private const val ONVIF_USERNAME = "admin"
-private const val CAMERA_CATEGORY = "sp"
+private const val UNVERIFIED_ONVIF_MESSAGE =
+    "ONVIF was never verified for this camera. Its feed uses the camera's last known address and password."
+internal const val CAMERA_CATEGORY = "sp"
 private const val NETWORK_SCAN_SETTLE_MILLIS = 4_000L
+const val MANUAL_PAIRING_KEY = "manual"
 
 data class OnboardingUiState(
     val isLoading: Boolean = true,
-    val step: WizardStep = WizardStep.CONNECT,
+    val stage: PairStage = PairStage.SETUP,
+    val pairingKey: String? = null,
+    val pairingName: String? = null,
+    val pairingIconUrl: String? = null,
+    val pairingBluetooth: Boolean = false,
+    val sheetOpen: Boolean = false,
+    val added: AddedDevice? = null,
+    val notice: String? = null,
     val settings: AppSettings = AppSettings(),
     val testingConnection: Boolean = false,
     val connectionVerified: Boolean = false,
-    val connectionNotice: String? = null,
     val connectionError: String? = null,
     val pendingDevice: PendingDeviceRecord? = null,
     val permissionRequestVersion: Long = 0,
@@ -111,9 +124,7 @@ data class OnboardingUiState(
     val activationProgress: String? = null,
     val activationError: String? = null,
     val activatedDevice: ActivatedDevice? = null,
-    val importResult: ImportResult? = null,
     val showLocalKey: Boolean = false,
-    val openedFromDeviceSettings: Boolean = false,
     val cameraAccountDevice: TuyaBleDevice? = null,
     val cameraEmail: String = "",
     val cameraPassword: String = "",
@@ -122,20 +133,20 @@ data class OnboardingUiState(
     val preparingCameraAccount: Boolean = false,
     val onvifStatus: OnvifStatus = OnvifStatus.IDLE,
     val onvifError: String? = null,
+    val onvifProgress: String? = null,
+    val onvifPasswordInput: String = CameraOnvifRepository.DEFAULT_PASSWORD,
     val onvifRecord: OnvifRecord? = null,
     val showOnvifPassword: Boolean = false,
     val showDestinationDialog: Boolean = false,
     val streamDestination: StreamDestination? = null,
-    val go2rtcUrl: String = "",
-    val go2rtcUsername: String = "",
-    val go2rtcPassword: String = "",
     val go2rtcUrlError: String? = null,
     val streamStatus: StreamStatus = StreamStatus.IDLE,
     val streamError: String? = null,
     val mainError: String? = null,
     val subError: String? = null,
     val mainEntryId: String? = null,
-    val subEntryId: String? = null
+    val subEntryId: String? = null,
+    val homeAssistantEntryId: String? = null
 ) {
     val busy: Boolean
         get() = activationStatus == ActivationStatus.ACTIVATING ||
@@ -146,8 +157,13 @@ data class OnboardingUiState(
             streamStatus == StreamStatus.REGISTERING
 }
 
+fun OnboardingUiState.homeAssistantEntryUrl(entryId: String) =
+    settings.hassUrl.trimEnd('/') + "/config/integrations/integration/tuya_local#config_entry=$entryId"
+
 private fun OnboardingUiState.withoutCameraState() = copy(
-    openedFromDeviceSettings = false,
+    homeAssistantEntryId = null,
+    onvifProgress = null,
+    onvifPasswordInput = CameraOnvifRepository.DEFAULT_PASSWORD,
     onvifStatus = OnvifStatus.IDLE,
     onvifError = null,
     onvifRecord = null,
@@ -170,6 +186,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     private val hotspotRepository = HotspotRepository(application)
     private val bleRepository = BleDeviceRepository()
     private val onvifRepository = CameraOnvifRepository()
+    private val accountRepository by lazy { TuyaAccountRepository(application, store) }
     private val go2rtcClient = Go2RtcClient()
     private val _uiState = kotlinx.coroutines.flow.MutableStateFlow(OnboardingUiState())
     private val importGeneration = AtomicLong(0)
@@ -190,7 +207,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 update {
                     copy(
                         activationProgress = message,
-                        hotspotMessage = if (step == WizardStep.HOTSPOT) message else hotspotMessage
+                        hotspotMessage = if (stage == PairStage.NEARBY) message else hotspotMessage
                     )
                 }
             }
@@ -227,7 +244,8 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                     name = device.name.orEmpty(),
                     productId = device.productId.orEmpty(),
                     protocolVersion = device.pv,
-                    category = device.category,
+                    // DeviceBean leaves `category` empty for cameras; `deviceCategory` carries the code (e.g. "sp").
+                    category = device.deviceCategory,
                     ip = device.ip
                 )
                 importDevice(activated)
@@ -275,7 +293,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 } else {
                     "$stage failed ($code): $sanitized"
                 }
-                if (current.step == WizardStep.ACTIVATE) {
+                if (current.stage == PairStage.PAIRING) {
                     hotspotRepository.disconnect()
                     update {
                         copy(
@@ -312,7 +330,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
             override fun onConnected(ssid: String) {
                 update {
                     copy(
-                        step = WizardStep.ACTIVATE,
+                        stage = PairStage.PAIRING,
                         hotspotStatus = HotspotStatus.CONNECTED,
                         hotspotMessage = "Connected to $ssid",
                         activationStatus = ActivationStatus.ACTIVATING,
@@ -325,7 +343,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
 
             override fun onConnectionFailed(message: String) {
                 activationRepository.stopActivation()
-                if (current.step == WizardStep.ACTIVATE) {
+                if (current.stage == PairStage.PAIRING) {
                     update {
                         copy(
                             activationStatus = ActivationStatus.FAILED,
@@ -336,6 +354,9 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 } else {
                     update {
                         copy(
+                            pairingKey = null,
+                            pairingName = null,
+                            pairingIconUrl = null,
                             hotspotStatus = HotspotStatus.ERROR,
                             hotspotError = message,
                             hotspotMessage = null
@@ -364,7 +385,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 }
                 val lookup = pendingLookupUuid == uuid
                 if (lookup) pendingLookupUuid = null
-                if (lookup && current.step == WizardStep.HOTSPOT) {
+                if (lookup && current.stage == PairStage.NEARBY) {
                     routeBleDevice(current.bleDevices.single { it.uuid == uuid })
                 }
             }
@@ -393,6 +414,8 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                     pendingDevice = pending
                 )
             }
+            // A saved, complete setup goes straight to pairing once Home Assistant answers.
+            if (validateSettings(settings) == null) testConnection()
         }
     }
 
@@ -400,7 +423,6 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         copy(
             settings = settings.copy(hassUrl = value),
             connectionVerified = false,
-            connectionNotice = null,
             connectionError = null
         )
     }
@@ -409,7 +431,6 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         copy(
             settings = settings.copy(adminToken = value),
             connectionVerified = false,
-            connectionNotice = null,
             connectionError = null
         )
     }
@@ -446,7 +467,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         val settings = normalizedSettings()
         val validationError = validateSettings(settings)
         if (validationError != null) {
-            update { copy(connectionError = validationError, connectionNotice = null) }
+            update { copy(connectionError = validationError) }
             return
         }
         update {
@@ -454,8 +475,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 settings = settings,
                 testingConnection = true,
                 connectionVerified = false,
-                connectionError = null,
-                connectionNotice = null
+                connectionError = null
             )
         }
         viewModelScope.launch {
@@ -473,16 +493,15 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 update {
                     copy(
                         connectionVerified = true,
-                        connectionNotice = "Connected. The token has administrator access.",
                         connectionError = null
                     )
                 }
+                if (current.stage == PairStage.SETUP) enterNearby()
             } catch (exception: HomeAssistantException) {
                 update {
                     copy(
                         connectionVerified = false,
-                        connectionError = homeAssistantMessage(exception, settings),
-                        connectionNotice = null
+                        connectionError = homeAssistantMessage(exception, settings)
                     )
                 }
             } finally {
@@ -491,60 +510,17 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    fun continueFromConnection() {
-        val settings = normalizedSettings()
-        val validationError = validateSettings(settings)
-        if (validationError != null) {
-            update { copy(connectionError = validationError) }
-            return
-        }
-        check(current.connectionVerified) {
-            "A verified Home Assistant connection is required"
-        }
-        viewModelScope.launch {
-            withContext(Dispatchers.IO) { store.saveSettings(settings) }
-            update {
-                copy(
-                    settings = settings,
-                    step = WizardStep.HOTSPOT,
-                    activationReady = false,
-                    connectionError = null,
-                    hotspotStatus = HotspotStatus.PREPARING,
-                    hotspotMessage = "Preparing secure Tuya activation…",
-                    hotspotError = null
-                )
-            }
-            prepareActivation()
-        }
-    }
-
-    fun backToConnection() {
-        pendingCameraDevice = null
-        pendingCameraAccount = null
-        pendingAfterReady = null
-        pendingLookupUuid = null
-        sessionIsCamera = false
-        importGeneration.incrementAndGet()
-        activationRepository.reset()
-        hotspotRepository.disconnect()
+    private fun enterNearby() {
         update {
             copy(
-                step = WizardStep.CONNECT,
-                cameraAccountDevice = null,
-                cameraEmail = "",
-                cameraPassword = "",
-                cameraAccountError = null,
-                preparingCameraAccount = false,
-                hotspots = emptyList(),
+                stage = PairStage.NEARBY,
                 activationReady = false,
-                hotspotStatus = HotspotStatus.IDLE,
-                hotspotMessage = null,
-                hotspotError = null,
-                activationStatus = ActivationStatus.IDLE,
-                activationError = null,
-                activationProgress = null
+                hotspotStatus = HotspotStatus.PREPARING,
+                hotspotMessage = "Preparing secure Tuya activation…",
+                hotspotError = null
             )
         }
+        prepareActivation()
     }
 
     fun prepareActivation() {
@@ -584,8 +560,9 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
 
     fun onScanPermissionsResult(granted: Boolean) {
         if (granted) {
-            if (current.step == WizardStep.CONNECT) refreshNetworks() else scanDevices()
-        } else if (current.step == WizardStep.CONNECT) {
+            refreshNetworks()
+            if (current.stage == PairStage.NEARBY && current.activationReady) scanDevices()
+        } else if (current.stage != PairStage.NEARBY) {
             update {
                 copy(networksError = "Permission denied. Allow Location and Nearby devices to list nearby Wi-Fi networks, then tap refresh.")
             }
@@ -697,7 +674,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                     withContext(Dispatchers.IO) { store.saveCameraAccount(account) }
                 }
                 if (pendingCameraDevice === device && pendingCameraAccount === account &&
-                    current.preparingCameraAccount && current.step == WizardStep.HOTSPOT
+                    current.preparingCameraAccount && current.stage == PairStage.NEARBY
                 ) {
                     markSessionReady()
                     startBleActivation(device)
@@ -761,10 +738,14 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         hotspotRepository.disconnect()
         update {
             copy(
-                step = WizardStep.ACTIVATE,
+                stage = PairStage.PAIRING,
+                pairingKey = device.uuid,
+                pairingName = checkNotNull(device.productName) { "Bluetooth device ${device.uuid} has no product name" },
+                pairingIconUrl = device.iconUrl,
+                pairingBluetooth = true,
                 activationStatus = ActivationStatus.ACTIVATING,
                 activationError = null,
-                activationProgress = null
+                activationProgress = "Activating over Bluetooth…"
             )
         }
         activationRepository.startBleActivation(current.settings, device)
@@ -783,6 +764,10 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         }
         update {
             copy(
+                pairingKey = ssid,
+                pairingName = ssid,
+                pairingIconUrl = null,
+                pairingBluetooth = false,
                 hotspotStatus = HotspotStatus.CONNECTING,
                 hotspotMessage = "Connecting to $ssid. Android may ask you to confirm the connection.",
                 hotspotError = null
@@ -801,7 +786,11 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         }
         update {
             copy(
-                step = WizardStep.ACTIVATE,
+                stage = PairStage.PAIRING,
+                pairingKey = MANUAL_PAIRING_KEY,
+                pairingName = "Current Wi-Fi hotspot",
+                pairingIconUrl = null,
+                pairingBluetooth = false,
                 activationStatus = ActivationStatus.ACTIVATING,
                 activationError = null,
                 activationProgress = "Starting activation on the currently connected hotspot…"
@@ -811,14 +800,13 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun retryActivation() {
-        if (current.activationStatus == ActivationStatus.IMPORT_FAILED) {
-            retryPendingImport()
-            return
-        }
         hotspotRepository.disconnect()
         update {
             copy(
-                step = WizardStep.HOTSPOT,
+                stage = PairStage.NEARBY,
+                pairingKey = null,
+                pairingName = null,
+                pairingIconUrl = null,
                 hotspotStatus = HotspotStatus.PREPARING,
                 activationReady = false,
                 hotspotMessage = "Requesting a fresh activation token…",
@@ -836,7 +824,10 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         hotspotRepository.disconnect()
         update {
             copy(
-                step = WizardStep.HOTSPOT,
+                stage = PairStage.NEARBY,
+                pairingKey = null,
+                pairingName = null,
+                pairingIconUrl = null,
                 hotspotStatus = HotspotStatus.READY,
                 hotspotMessage = if (failed) "Activation failed. Tap your device to try again."
                 else "Activation cancelled. Reconnect or try again.",
@@ -852,80 +843,84 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         importDevice(pending.device)
     }
 
-    fun showPendingCredentials() {
-        val pending = checkNotNull(current.pendingDevice) { "No pending device to display" }
-        update {
-            copy(
-                step = WizardStep.DONE,
-                activatedDevice = pending.device,
-                importResult = null,
-                activationStatus = ActivationStatus.COMPLETE,
-                activationError = pending.lastError
-            )
-        }
-    }
-
     fun openDeviceSetup(device: ActivatedDevice) {
         check(!current.busy) { "Onboarding is busy; cannot open device setup" }
         viewModelScope.launch {
-            val (pending, onvif) = withContext(Dispatchers.IO) {
-                val existing = store.loadPendingDevice()
-                val record = if (existing?.device?.deviceId == device.deviceId) {
-                    existing.copy(device = device)
-                } else {
-                    PendingDeviceRecord(device, ImportState.PENDING, null)
-                }
-                store.savePendingDevice(record)
-                record to store.loadOnvifRecord(device.deviceId)
+            val (onvif, lastSent) = withContext(Dispatchers.IO) {
+                store.loadOnvifRecord(device.deviceId) to knownOnvifPassword(device.deviceId)
             }
             update {
                 copy(
-                    step = WizardStep.DONE,
-                    pendingDevice = pending,
+                    sheetOpen = true,
+                    pendingDevice = null,
                     activatedDevice = device,
-                    importResult = null,
-                    activationStatus = ActivationStatus.COMPLETE,
-                    activationProgress = null,
-                    activationError = pending.lastError,
                     showLocalKey = false
                 ).withoutCameraState().copy(
-                    openedFromDeviceSettings = true,
+                    onvifPasswordInput = lastSent ?: CameraOnvifRepository.DEFAULT_PASSWORD,
                     onvifRecord = onvif,
-                    onvifStatus = if (onvif != null) OnvifStatus.COMPLETE else OnvifStatus.IDLE,
-                    onvifError = null,
-                    connectionVerified = false,
-                    connectionError = null,
-                    connectionNotice = null
+                    onvifStatus = when {
+                        onvif == null -> OnvifStatus.IDLE
+                        onvif.verified -> OnvifStatus.COMPLETE
+                        else -> OnvifStatus.FAILED
+                    },
+                    onvifError = if (onvif != null && !onvif.verified) UNVERIFIED_ONVIF_MESSAGE else null,
+                    connectionError = null
                 )
             }
-            testConnection()
+            val entryId = try {
+                withContext(Dispatchers.IO) { homeAssistantClient.tuyaLocalEntryId(device.deviceId) }
+            } catch (exception: HomeAssistantException) {
+                update { copy(connectionVerified = false, connectionError = homeAssistantMessage(exception, settings)) }
+                return@launch
+            }
+            val record = PendingDeviceRecord(
+                device,
+                if (entryId != null) ImportState.IMPORTED else ImportState.PENDING,
+                null
+            )
+            withContext(Dispatchers.IO) { store.savePendingDevice(record) }
+            // tuyaLocalEntryId opens an admin-verified session, so success proves the connection.
+            update { copy(pendingDevice = record, homeAssistantEntryId = entryId, connectionVerified = true) }
         }
     }
 
-    fun addAnotherDevice() {
-        val generation = importGeneration.incrementAndGet()
+    fun consumeAdded() = update { copy(added = null) }
+
+    fun consumeNotice() = update { copy(notice = null) }
+
+    fun closeSheet() {
+        check(!sheetBusy()) { "The device sheet is busy" }
+        clearSheet()
+    }
+
+    private fun sheetBusy() = current.sheetOpen && (
+        current.activationStatus == ActivationStatus.IMPORTING ||
+            current.onvifStatus == OnvifStatus.CONFIGURING ||
+            current.streamStatus == StreamStatus.REGISTERING
+        )
+
+    private fun clearSheet() = update {
+        copy(sheetOpen = false, activatedDevice = null, pendingDevice = null, showLocalKey = false).withoutCameraState()
+    }
+
+    // Leaves the device sheet's state alone: a failure hands its device to the sheet right after this reset.
+    private fun resetPairing(added: AddedDevice?) {
+        importGeneration.incrementAndGet()
         activationRepository.reset()
         hotspotRepository.disconnect()
         update {
             copy(
-                step = WizardStep.HOTSPOT,
-                pendingDevice = null,
-                hotspots = emptyList(),
-                bleDevices = emptyList(),
-                hotspotStatus = HotspotStatus.PREPARING,
-                activationReady = false,
-                hotspotMessage = "Preparing the next activation…",
-                hotspotError = null,
+                stage = PairStage.NEARBY,
+                pairingKey = null,
+                pairingName = null,
+                pairingIconUrl = null,
                 activationStatus = ActivationStatus.IDLE,
                 activationProgress = null,
                 activationError = null,
-                showLocalKey = false
-            ).withoutCameraState()
+                added = added
+            )
         }
-        viewModelScope.launch {
-            withContext(Dispatchers.IO) { store.deletePendingDevice() }
-            if (generation == importGeneration.get()) prepareActivation()
-        }
+        prepareActivation()
     }
 
     private fun scanDevices() {
@@ -952,16 +947,16 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     private fun finishScanIfDone() {
         if (wifiScanPending || bleScanPending) return
         val found = current.hotspots.isNotEmpty() || current.bleDevices.isNotEmpty()
+        // Finding nothing is an expected outcome; only a failed Wi-Fi scan is an error.
         val notFound = buildString {
-            append("No Tuya device found. Put the device in pairing mode, then scan again.")
-            if (bluetoothOffDuringScan) append(" Turn on Bluetooth to find Bluetooth-paired devices.")
-            wifiScanError?.let { append(" Wi-Fi scan: ").append(it) }
+            append("No device found. Reset it until its light blinks fast, keep it close, then tap Scan.")
+            if (bluetoothOffDuringScan) append(" Bluetooth is off, so Bluetooth devices can't be found.")
         }
         update {
             copy(
-                hotspotStatus = if (found) HotspotStatus.READY else HotspotStatus.ERROR,
-                hotspotMessage = if (found) "Tap your device to continue." else null,
-                hotspotError = if (found) null else notFound
+                hotspotStatus = HotspotStatus.READY,
+                hotspotMessage = if (found) "Tap your device to pair it." else notFound,
+                hotspotError = wifiScanError?.let { "Wi-Fi scan failed: $it" }
             )
         }
     }
@@ -972,13 +967,11 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         val isCamera = device.category == CAMERA_CATEGORY
         update {
             copy(
-                step = WizardStep.ACTIVATE,
                 activatedDevice = device,
                 activationStatus = ActivationStatus.IMPORTING,
-                activationProgress = if (isCamera) "Device activated. Configuring ONVIF…"
-                else "Device activated. Importing it into Home Assistant…",
-                activationError = null,
-                importResult = null
+                activationProgress = if (isCamera) "Activated. Configuring ONVIF…"
+                else "Activated. Importing into Home Assistant…",
+                activationError = null
             ).withoutCameraState()
         }
         viewModelScope.launch {
@@ -988,32 +981,35 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 store.loadOnvifRecord(device.deviceId)
             }
             var onvifFailure: CameraOnvifException? = null
-            if (isCamera && onvifConfigured == null && device.deviceId.isNotBlank()) {
-                for (attempt in 1..2) {
-                    if (generation != importGeneration.get()) return@launch
-                    val existingPassword = withContext(Dispatchers.IO) {
-                        store.loadOnvifRecord(device.deviceId)?.password
-                            ?: store.loadPendingOnvifPassword(device.deviceId)
-                    }
-                    try {
-                        val record = onvifRepository.configure(device, existingPassword) { password ->
-                            withContext(Dispatchers.IO) {
-                                store.savePendingOnvifPassword(device.deviceId, password)
+            if (isCamera && onvifConfigured?.verified != true && device.deviceId.isNotBlank()) {
+                if (generation != importGeneration.get()) return@launch
+                val existingPassword = withContext(Dispatchers.IO) { knownOnvifPassword(device.deviceId) }
+                try {
+                    signInToCamera()
+                    val record = onvifRepository.configure(
+                        device,
+                        existingPassword,
+                        onProgress = { message ->
+                            if (generation == importGeneration.get()) {
+                                update { copy(activationProgress = "Configuring ONVIF: $message") }
                             }
                         }
-                        withContext(Dispatchers.IO) { store.saveOnvifRecord(record) }
-                        onvifConfigured = record
-                        onvifFailure = null
-                        break
-                    } catch (exception: CameraOnvifException) {
-                        // Try up to 2 times during registration; if both fail, add the device anyway and show why.
-                        onvifFailure = exception
+                    ) { password ->
+                        withContext(Dispatchers.IO) {
+                            store.savePendingOnvifPassword(device.deviceId, password)
+                        }
                     }
+                    withContext(Dispatchers.IO) { store.saveOnvifRecord(record) }
+                    onvifConfigured = record
+                } catch (exception: CameraOnvifException) {
+                    // ONVIF failing doesn't stop the import; the device is added anyway and the error is shown.
+                    onvifFailure = exception
                 }
             }
             if (generation != importGeneration.get()) return@launch
+            // A failed ONVIF run may still have moved the camera to a new DHCP address, so rediscover it.
             val existingLanIp = onvifConfigured?.address
-                ?: device.ip?.trim()?.takeIf(HomeAssistantProtocol::isRfc1918Address)
+                ?: device.ip?.trim()?.takeIf { onvifFailure == null && HomeAssistantProtocol.isRfc1918Address(it) }
             val existingLanProto = device.protocolVersion?.trim()
                 ?.takeIf(HomeAssistantProtocol::isSupportedProtocolVersion)
             val lanDiscovered = if (existingLanIp == null || existingLanProto == null) {
@@ -1030,6 +1026,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 ip = existingLanIp ?: lanDiscovered?.ip ?: device.ip,
                 protocolVersion = existingLanProto ?: lanDiscovered?.protocolVersion ?: device.protocolVersion
             )
+            if (onvifFailure != null) onvifConfigured = unverifiedOnvifRecord(deviceForImport)
             try {
                 val result = withContext(Dispatchers.IO) {
                     store.savePendingDevice(deviceForImport)
@@ -1044,10 +1041,8 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                     }
                 }
                 if (generation != importGeneration.get()) return@launch
-                val pendingOnvifPassword = withContext(Dispatchers.IO) {
-                    store.loadPendingOnvifPassword(device.deviceId)
-                }
                 val onvifError = onvifFailure?.let { failure ->
+                    val pendingOnvifPassword = withContext(Dispatchers.IO) { knownOnvifPassword(device.deviceId) }
                     sanitizeError(
                         checkNotNull(failure.message),
                         current.settings,
@@ -1058,27 +1053,45 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 }
                 update {
                     copy(
-                        step = WizardStep.DONE,
                         pendingDevice = imported,
                         activatedDevice = deviceForImport,
-                        importResult = result,
-                        activationStatus = ActivationStatus.COMPLETE,
-                        activationProgress = null,
-                        activationError = null,
                         onvifRecord = onvifConfigured,
                         onvifStatus = when {
-                            onvifConfigured != null -> OnvifStatus.COMPLETE
                             onvifFailure != null -> OnvifStatus.FAILED
+                            onvifConfigured != null -> OnvifStatus.COMPLETE
                             else -> OnvifStatus.IDLE
                         },
-                        onvifError = onvifError,
-                        streamDestination = StreamDestination.TUYA_LOCAL,
-                        showDestinationDialog = onvifConfigured != null && connectionVerified,
+                        onvifError = onvifError?.let { "ONVIF setup failed: $it" },
+                        streamDestination = defaultDestination(),
                         streamStatus = StreamStatus.IDLE,
                         mainEntryId = null,
                         subEntryId = null
                     )
                 }
+                if (onvifConfigured != null && current.connectionVerified) {
+                    update { copy(activationProgress = "Adding the camera feed to Home Assistant…") }
+                    registerStreams(generation)
+                    if (generation != importGeneration.get()) return@launch
+                }
+                if (!isCamera || (current.onvifStatus == OnvifStatus.COMPLETE && current.streamStatus == StreamStatus.COMPLETE)) {
+                    val added = AddedDevice(deviceForImport.name, current.homeAssistantEntryUrl(result.entryId))
+                    if (current.sheetOpen) clearSheet()
+                    resetPairing(added)
+                    return@launch
+                }
+                if (isCamera && onvifConfigured == null) {
+                    update {
+                        copy(
+                            onvifStatus = OnvifStatus.FAILED,
+                            onvifError = listOfNotNull(
+                                onvifError,
+                                "The camera's local IP address is unknown, so its feed was not added."
+                            ).joinToString("\n")
+                        )
+                    }
+                }
+                resetPairing(added = null)
+                update { copy(sheetOpen = true, homeAssistantEntryId = result.entryId) }
             } catch (exception: HomeAssistantException) {
                 if (generation != importGeneration.get()) return@launch
                 val message = homeAssistantMessage(exception, current.settings)
@@ -1087,17 +1100,34 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                     if (generation == importGeneration.get()) store.savePendingDevice(failed)
                 }
                 if (generation != importGeneration.get()) return@launch
-                update {
-                    copy(
-                        pendingDevice = failed,
-                        activatedDevice = deviceForImport,
-                        activationStatus = ActivationStatus.IMPORT_FAILED,
-                        activationProgress = null,
-                        activationError = message,
-                        importResult = null
-                    )
-                }
+                resetPairing(added = null)
+                update { copy(sheetOpen = true, pendingDevice = failed, activatedDevice = deviceForImport) }
             }
+        }
+    }
+
+    // DP commands are rejected with PERMISSION_DENIED unless the signed-in user owns the camera.
+    private suspend fun signInToCamera() {
+        val account = store.loadCameraAccount()
+            ?: throw CameraOnvifException("Tuya account", "No camera account is saved, so the camera's settings can't be changed.")
+        try {
+            accountRepository.signIn(account)
+        } catch (e: TuyaSdkException) {
+            throw CameraOnvifException("Tuya account", checkNotNull(e.message))
+        }
+    }
+
+    // The pending password is the most recent one sent to the camera; saving a record clears it.
+    private fun knownOnvifPassword(deviceId: String): String? =
+        store.loadPendingOnvifPassword(deviceId) ?: store.loadOnvifRecord(deviceId)?.password
+
+    // Returns null when the camera's LAN address is unknown, so there is no feed URL to register.
+    private suspend fun unverifiedOnvifRecord(device: ActivatedDevice): OnvifRecord? {
+        val address = device.ip?.trim()?.takeIf(HomeAssistantProtocol::isRfc1918Address) ?: return null
+        return withContext(Dispatchers.IO) {
+            val record = onvifRepository.unverifiedRecord(device, address, knownOnvifPassword(device.deviceId))
+            store.saveOnvifRecord(record)
+            record
         }
     }
 
@@ -1116,6 +1146,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         copy(
             onvifStatus = OnvifStatus.CONFIGURING,
             onvifError = null,
+            onvifProgress = "Starting ONVIF setup…",
             onvifRecord = null,
             showOnvifPassword = false,
             showDestinationDialog = false,
@@ -1129,189 +1160,273 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     private suspend fun configureOnvif(device: ActivatedDevice, generation: Long) {
-        val existingPassword = withContext(Dispatchers.IO) {
-            store.loadOnvifRecord(device.deviceId)?.password ?: store.loadPendingOnvifPassword(device.deviceId)
-        }
+        val existingPassword = withContext(Dispatchers.IO) { knownOnvifPassword(device.deviceId) }
         if (generation != importGeneration.get()) return
-        val configured = try {
+        val errors = mutableListOf<String>()
+        val record = try {
+            signInToCamera()
             onvifRepository.configure(
                 device,
-                existingPassword
+                existingPassword,
+                onProgress = { message ->
+                    if (generation == importGeneration.get()) update { copy(onvifProgress = message) }
+                }
             ) { password ->
                 withContext(Dispatchers.IO) { store.savePendingOnvifPassword(device.deviceId, password) }
-            }
+            }.also { configured -> withContext(Dispatchers.IO) { store.saveOnvifRecord(configured) } }
         } catch (exception: CameraOnvifException) {
             if (generation != importGeneration.get()) return
-            update {
-                copy(
-                    onvifStatus = OnvifStatus.FAILED,
-                    onvifError = sanitizeError(checkNotNull(exception.message), settings, device, existingPassword, *accountSecrets())
-                )
-            }
-            return
+            val sentPassword = withContext(Dispatchers.IO) { knownOnvifPassword(device.deviceId) }
+            errors += "ONVIF setup failed: " + sanitizeError(
+                checkNotNull(exception.message), current.settings, device, existingPassword, sentPassword, *accountSecrets()
+            )
+            update { copy(onvifProgress = "Finding the camera on the local network…") }
+            val found = withContext(Dispatchers.IO) { TuyaLanScanner.findDevice(device.deviceId) }
+            unverifiedOnvifRecord(device.copy(ip = found?.ip ?: device.ip))
         }
-        withContext(Dispatchers.IO) { store.saveOnvifRecord(configured) }
+        if (generation != importGeneration.get()) return
+        if (record == null) errors += "The camera's local IP address is unknown, so its feed was not added."
+        // Cycling the IP mode can give the camera a new DHCP address; Tuya Local must follow it. Compare with the
+        // host Tuya Local actually uses: re-importing an unchanged host opens a second connection the camera refuses.
+        val haHost = if (record != null && current.connectionVerified) {
+            update { copy(onvifProgress = "Checking the camera's address in Home Assistant…") }
+            try {
+                withContext(Dispatchers.IO) { homeAssistantClient.tuyaLocalHost(device.deviceId) }
+            } catch (exception: HomeAssistantException) {
+                errors += "Could not read the camera's address from Home Assistant: " +
+                    homeAssistantMessage(exception, current.settings)
+                null
+            }
+        } else null
+        if (generation != importGeneration.get()) return
+        if (record != null && haHost != null && haHost != record.address) {
+            update { copy(onvifProgress = "The camera moved from $haHost to ${record.address}. Updating Home Assistant…") }
+            val moved = device.copy(ip = record.address)
+            try {
+                val result = withContext(Dispatchers.IO) { homeAssistantClient.importDevice(moved) }
+                val imported = PendingDeviceRecord(moved, ImportState.IMPORTED, null)
+                withContext(Dispatchers.IO) { store.savePendingDevice(imported) }
+                if (generation != importGeneration.get()) return
+                update { copy(activatedDevice = moved, pendingDevice = imported, homeAssistantEntryId = result.entryId) }
+            } catch (exception: HomeAssistantException) {
+                errors += "Could not update the camera's address in Home Assistant: " +
+                    homeAssistantMessage(exception, current.settings)
+            }
+        }
+        val lastSent = withContext(Dispatchers.IO) { knownOnvifPassword(device.deviceId) }
         if (generation != importGeneration.get()) return
         update {
             copy(
-                onvifStatus = OnvifStatus.COMPLETE,
-                onvifRecord = configured,
-                streamDestination = streamDestination ?: StreamDestination.TUYA_LOCAL,
-                showDestinationDialog = connectionVerified
+                onvifStatus = if (errors.isEmpty()) OnvifStatus.COMPLETE else OnvifStatus.FAILED,
+                onvifPasswordInput = lastSent ?: CameraOnvifRepository.DEFAULT_PASSWORD,
+                onvifRecord = record,
+                onvifError = errors.joinToString("\n").ifEmpty { null },
+                onvifProgress = null
             )
+        }
+        if (record != null && current.connectionVerified) {
+            update { copy(streamDestination = streamDestination ?: defaultDestination()) }
+            registerStreams(generation)
         }
     }
 
     fun toggleOnvifPasswordVisibility() = update { copy(showOnvifPassword = !showOnvifPassword) }
 
+    fun updateOnvifPasswordInput(value: String) = update { copy(onvifPasswordInput = value) }
+
+    // The typed password is the one the camera has now. It is stored before use, so a retry keeps it.
+    fun useOnvifPasswordInput() {
+        val device = checkNotNull(current.activatedDevice) { "No device for the ONVIF password" }
+        val password = current.onvifPasswordInput
+        check(password.isNotBlank()) { "ONVIF password is empty" }
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { store.savePendingOnvifPassword(device.deviceId, password) }
+            retryOnvif()
+        }
+    }
+
     fun selectDestination(destination: StreamDestination) =
         update { copy(streamDestination = destination, go2rtcUrlError = null) }
 
-    fun updateGo2rtcUrl(value: String) = update { copy(go2rtcUrl = value, go2rtcUrlError = null) }
+    fun updateGo2rtcUrl(value: String) =
+        update { copy(settings = settings.copy(go2rtcUrl = value), go2rtcUrlError = null) }
 
-    fun updateGo2rtcUsername(value: String) = update { copy(go2rtcUsername = value, go2rtcUrlError = null) }
+    fun updateGo2rtcUsername(value: String) =
+        update { copy(settings = settings.copy(go2rtcUsername = value), go2rtcUrlError = null) }
 
-    fun updateGo2rtcPassword(value: String) = update { copy(go2rtcPassword = value, go2rtcUrlError = null) }
+    fun updateGo2rtcPassword(value: String) =
+        update { copy(settings = settings.copy(go2rtcPassword = value), go2rtcUrlError = null) }
+
+    fun saveWifi() {
+        val settings = normalizedSettings()
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { store.saveSettings(settings) }
+            update { copy(settings = settings, notice = "Home Wi-Fi saved.") }
+        }
+    }
+
+    fun selectDefaultDestination(destination: StreamDestination) =
+        update { copy(settings = settings.copy(feedDestination = destination.storedName), go2rtcUrlError = null) }
+
+    fun saveFeedSettings() {
+        if (!validGo2rtcTarget(current.settings.feedDestination == StreamDestination.GO2RTC.storedName)) return
+        val settings = current.settings
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { store.saveSettings(settings) }
+            update { copy(notice = "Camera feed settings saved.") }
+        }
+    }
+
+    // go2rtc is only parsed when it is the destination in use; other destinations never read it.
+    private fun validGo2rtcTarget(usesGo2rtc: Boolean): Boolean {
+        if (!usesGo2rtc) return true
+        try {
+            go2rtcClient.parseTarget(current.settings.go2rtcUrl, current.settings.go2rtcUsername, current.settings.go2rtcPassword)
+        } catch (exception: IllegalArgumentException) {
+            update { copy(go2rtcUrlError = "Enter a valid go2rtc API URL (for example http://192.168.1.10:1984); username and password must be filled together.") }
+            return false
+        }
+        return true
+    }
+
+    private fun defaultDestination() =
+        StreamDestination.entries.single { it.storedName == current.settings.feedDestination }
 
     fun dismissDestinationDialog() = update { copy(showDestinationDialog = false) }
 
     fun confirmDestination() {
         val destination = checkNotNull(current.streamDestination) { "No stream destination selected" }
+        if (!validGo2rtcTarget(destination == StreamDestination.GO2RTC)) return
         if (destination == StreamDestination.GO2RTC) {
-            try {
-                go2rtcClient.parseTarget(current.go2rtcUrl, current.go2rtcUsername, current.go2rtcPassword)
-            } catch (exception: IllegalArgumentException) {
-                update { copy(go2rtcUrlError = "Enter a valid go2rtc API URL (for example http://192.168.1.10:1984); username and password must be filled together.") }
-                return
-            }
+            val settings = current.settings
+            viewModelScope.launch { withContext(Dispatchers.IO) { store.saveSettings(settings) } }
         }
         update {
             copy(showDestinationDialog = false, mainEntryId = null, subEntryId = null, mainError = null, subError = null)
         }
-        registerStreams()
+        val generation = importGeneration.get()
+        viewModelScope.launch { registerStreams(generation) }
     }
 
     fun retryStreamRegistration() {
         if (current.streamStatus == StreamStatus.IDLE || current.streamStatus == StreamStatus.COMPLETE) {
             update {
                 copy(
-                    streamDestination = streamDestination ?: StreamDestination.TUYA_LOCAL,
+                    streamDestination = streamDestination ?: defaultDestination(),
                     showDestinationDialog = true
                 )
             }
             return
         }
-        registerStreams()
+        val generation = importGeneration.get()
+        viewModelScope.launch { registerStreams(generation) }
     }
 
-    private fun registerStreams() {
+    private suspend fun registerStreams(generation: Long) {
         val device = checkNotNull(current.activatedDevice) { "No activated device to register" }
         val record = checkNotNull(current.onvifRecord) { "ONVIF has not completed" }
         val destination = checkNotNull(current.streamDestination) { "No stream destination selected" }
         check(current.connectionVerified) { "Home Assistant connection is not verified" }
         check(current.streamStatus != StreamStatus.REGISTERING) { "Stream registration is already running" }
         val settings = current.settings
-        val generation = importGeneration.get()
         update { copy(streamStatus = StreamStatus.REGISTERING, streamError = null) }
-        viewModelScope.launch {
-            val target = if (destination == StreamDestination.GO2RTC) {
-                go2rtcClient.parseTarget(current.go2rtcUrl, current.go2rtcUsername, current.go2rtcPassword)
-            } else null
+        val target = if (destination == StreamDestination.GO2RTC) {
+            go2rtcClient.parseTarget(current.settings.go2rtcUrl, current.settings.go2rtcUsername, current.settings.go2rtcPassword)
+        } else null
 
-            suspend fun register(title: String, directUrl: String, streamName: String): Pair<String?, String?> {
-                try {
-                    val source = if (target != null) {
-                        withContext(Dispatchers.IO) {
-                            go2rtcClient.putStream(target, streamName, authenticatedUrl(directUrl, record.password))
-                        }
-                        "${target.rtspBase}/$streamName"
-                    } else directUrl
-                    val entryId = withContext(Dispatchers.IO) {
-                        if (target != null) homeAssistantClient.createCamera(title, source, "", "")
-                        else homeAssistantClient.createCamera(title, source, ONVIF_USERNAME, record.password)
+        suspend fun register(title: String, directUrl: String, streamName: String): Pair<String?, String?> {
+            try {
+                val source = if (target != null) {
+                    withContext(Dispatchers.IO) {
+                        go2rtcClient.putStream(target, streamName, authenticatedUrl(directUrl, record.password))
                     }
-                    return entryId to null
-                } catch (exception: HomeAssistantException) {
-                    return null to sanitizeError(homeAssistantMessage(exception, settings), settings, device, record.password, *accountSecrets())
-                } catch (exception: IOException) {
-                    val detail = "go2rtc is unreachable: ${exception.javaClass.simpleName}: ${exception.message}"
-                    return null to sanitizeError(detail, settings, device, record.password, *accountSecrets())
-                } catch (exception: IllegalStateException) {
-                    return null to sanitizeError(checkNotNull(exception.message), settings, device, record.password, *accountSecrets())
+                    "${target.rtspBase}/$streamName"
+                } else directUrl
+                val entryId = withContext(Dispatchers.IO) {
+                    if (target != null) homeAssistantClient.createCamera(title, source, "", "")
+                    else homeAssistantClient.createCamera(title, source, ONVIF_USERNAME, record.password)
                 }
+                return entryId to null
+            } catch (exception: HomeAssistantException) {
+                return null to sanitizeError(homeAssistantMessage(exception, settings), settings, device, record.password, *accountSecrets())
+            } catch (exception: IOException) {
+                val detail = "go2rtc is unreachable: ${exception.javaClass.simpleName}: ${exception.message}"
+                return null to sanitizeError(detail, settings, device, record.password, *accountSecrets())
+            } catch (exception: IllegalStateException) {
+                return null to sanitizeError(checkNotNull(exception.message), settings, device, record.password, *accountSecrets())
             }
+        }
 
-            if (destination == StreamDestination.TUYA_LOCAL) {
-                try {
-                    val entryId = withContext(Dispatchers.IO) {
-                        homeAssistantClient.configureTuyaStreams(
-                            device.deviceId,
-                            authenticatedUrl(record.mainUrl, record.password),
-                            authenticatedUrl(record.subUrl, record.password)
-                        )
-                    }
-                    if (generation != importGeneration.get()) return@launch
-                    val registered = record.copy(destination = destination.storedName, registered = true)
-                    withContext(Dispatchers.IO) { store.saveOnvifRecord(registered) }
-                    if (generation != importGeneration.get()) return@launch
-                    update {
-                        copy(
-                            mainEntryId = entryId,
-                            subEntryId = entryId,
-                            mainError = null,
-                            subError = null,
-                            streamStatus = StreamStatus.COMPLETE,
-                            onvifRecord = registered
-                        )
-                    }
-                    return@launch
-                } catch (exception: HomeAssistantException) {
-                    if (exception.error != HomeAssistantError.UNKNOWN_COMMAND) {
-                        if (generation != importGeneration.get()) return@launch
-                        val error = sanitizeError(homeAssistantMessage(exception, settings), settings, device, record.password, *accountSecrets())
-                        update {
-                            copy(
-                                mainError = error,
-                                subError = null,
-                                streamStatus = StreamStatus.FAILED,
-                                streamError = error
-                            )
-                        }
-                        return@launch
-                    }
-                    // Stock tuya-local does not expose tuya_local/configure_streams; register via Generic Camera.
-                }
-            }
-
-            if (current.mainEntryId == null) {
-                val (entryId, error) = register(
-                    "${device.name} Main", record.mainUrl, go2rtcClient.mainStreamName(device.deviceId)
-                )
-                if (generation != importGeneration.get()) return@launch
-                update { copy(mainEntryId = entryId, mainError = error) }
-            }
-            if (current.subEntryId == null) {
-                val (entryId, error) = register(
-                    "${device.name} Substream", record.subUrl, go2rtcClient.subStreamName(device.deviceId)
-                )
-                if (generation != importGeneration.get()) return@launch
-                update { copy(subEntryId = entryId, subError = error) }
-            }
-            if (current.mainEntryId != null && current.subEntryId != null) {
-                val registered = record.copy(destination = destination.storedName, registered = true)
-                withContext(Dispatchers.IO) { store.saveOnvifRecord(registered) }
-                if (generation != importGeneration.get()) return@launch
-                update { copy(streamStatus = StreamStatus.COMPLETE, onvifRecord = registered) }
-            } else {
-                update {
-                    copy(
-                        streamStatus = StreamStatus.FAILED,
-                        streamError = listOfNotNull(
-                            mainError?.let { "Main stream: $it" },
-                            subError?.let { "Substream: $it" }
-                        ).joinToString("\n")
+        if (destination == StreamDestination.TUYA_LOCAL) {
+            try {
+                val entryId = withContext(Dispatchers.IO) {
+                    homeAssistantClient.configureTuyaStreams(
+                        device.deviceId,
+                        authenticatedUrl(record.mainUrl, record.password),
+                        authenticatedUrl(record.subUrl, record.password)
                     )
                 }
+                if (generation != importGeneration.get()) return
+                val registered = record.copy(destination = destination.storedName, registered = true)
+                withContext(Dispatchers.IO) { store.saveOnvifRecord(registered) }
+                if (generation != importGeneration.get()) return
+                update {
+                    copy(
+                        mainEntryId = entryId,
+                        subEntryId = entryId,
+                        mainError = null,
+                        subError = null,
+                        streamStatus = StreamStatus.COMPLETE,
+                        onvifRecord = registered
+                    )
+                }
+                return
+            } catch (exception: HomeAssistantException) {
+                if (exception.error != HomeAssistantError.UNKNOWN_COMMAND) {
+                    if (generation != importGeneration.get()) return
+                    val error = sanitizeError(homeAssistantMessage(exception, settings), settings, device, record.password, *accountSecrets())
+                    update {
+                        copy(
+                            mainError = error,
+                            subError = null,
+                            streamStatus = StreamStatus.FAILED,
+                            streamError = error
+                        )
+                    }
+                    return
+                }
+                // Stock tuya-local does not expose tuya_local/configure_streams; register via Generic Camera.
+            }
+        }
+
+        if (current.mainEntryId == null) {
+            val (entryId, error) = register(
+                "${device.name} Main", record.mainUrl, go2rtcClient.mainStreamName(device.deviceId)
+            )
+            if (generation != importGeneration.get()) return
+            update { copy(mainEntryId = entryId, mainError = error) }
+        }
+        if (current.subEntryId == null) {
+            val (entryId, error) = register(
+                "${device.name} Substream", record.subUrl, go2rtcClient.subStreamName(device.deviceId)
+            )
+            if (generation != importGeneration.get()) return
+            update { copy(subEntryId = entryId, subError = error) }
+        }
+        if (current.mainEntryId != null && current.subEntryId != null) {
+            val registered = record.copy(destination = destination.storedName, registered = true)
+            withContext(Dispatchers.IO) { store.saveOnvifRecord(registered) }
+            if (generation != importGeneration.get()) return
+            update { copy(streamStatus = StreamStatus.COMPLETE, onvifRecord = registered) }
+        } else {
+            update {
+                copy(
+                    streamStatus = StreamStatus.FAILED,
+                    streamError = listOfNotNull(
+                        mainError?.let { "Main stream: $it" },
+                        subError?.let { "Substream: $it" }
+                    ).joinToString("\n")
+                )
             }
         }
     }
@@ -1321,7 +1436,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         store.loadCameraAccount()?.password,
         pendingCameraAccount?.password,
         current.cameraPassword,
-        current.go2rtcPassword
+        current.settings.go2rtcPassword
     )
 
     private fun authenticatedUrl(url: String, password: String) =
