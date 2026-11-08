@@ -4,19 +4,18 @@ Local-first Tuya device onboarding for Home Assistant.
 
 Tuyeasie pairs Tuya devices from an Android phone, extracts their local credentials, and imports them into the included `tuya-local` integration. It supports Wi-Fi access-point provisioning and Bluetooth-assisted pairing for Wi-Fi + BLE combo devices, without requiring the official Tuya app for normal setup.
 
+[Pairing a camera into Home Assistant](demo/pairing.mp4) (2m36s). The clip starts on the Pair tab, pairs a camera over Bluetooth, and ends on the device page in Home Assistant with the Tuya Local controls.
+
 ## Features
 
-- Guided Home Assistant and Wi-Fi setup.
-- Combined Wi-Fi hotspot and Bluetooth device discovery.
-- Product names and icons for discovered Bluetooth devices.
-- AP and Bluetooth activation with a programmatically managed Tuya account.
-- Authenticated `tuya-local` import with loaded-entry verification.
-- Encrypted storage for Home Assistant, Wi-Fi, Tuya, and device credentials.
-- Saved credentials and independent retry paths.
-- Automatic camera account setup with a prominent recovery warning.
-- ONVIF static-IP configuration and generated per-camera credentials.
-- Main and substream RTSP registration through Generic Camera or go2rtc.
-- Local camera settings through the included PTZ camera profile.
+- Pair, Devices and Settings tabs. Home Assistant and Wi-Fi are entered once, then pairing is scan and tap.
+- Combined Wi-Fi hotspot and Bluetooth device discovery, with product names and icons.
+- AP and Bluetooth activation. Cameras use a saved Tuya account. Other devices use a generated one.
+- Authenticated `tuya-local` import, with the entry checked against Home Assistant's device registry.
+- Encrypted storage for Home Assistant, Wi-Fi, Tuya and device credentials.
+- Camera ONVIF setup on the account that owns the camera: the password is set before ONVIF is enabled, then the IP mode is toggled and restored so the camera starts RTSP. The factory password is `admin`.
+- Main and substream registration on the Tuya Local device, with Generic Camera or go2rtc as alternatives.
+- Local camera controls through the included PTZ camera profile.
 
 ## Repository layout
 
