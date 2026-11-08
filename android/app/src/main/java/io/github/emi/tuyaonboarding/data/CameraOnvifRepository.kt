@@ -14,14 +14,13 @@ import java.net.Socket
 import java.security.MessageDigest
 import java.security.SecureRandom
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -32,32 +31,50 @@ class CameraOnvifRepository {
     suspend fun configure(
         device: ActivatedDevice,
         existingPassword: String?,
+        onProgress: (String) -> Unit,
         savePassword: suspend (String) -> Unit
     ): OnvifRecord {
-        val password = existingPassword ?: generatePassword()
         val oldPassword = existingPassword ?: DEFAULT_PASSWORD
-        val sdkDevice = ThingHomeSdk.newDeviceInstance(device.deviceId)
+        // Always rotate: the camera refuses a change whose new password equals the current one (DP 238 errcode 2).
+        val password = generatePassword()
+        val camera = Camera(ThingHomeSdk.newDeviceInstance(device.deviceId), device.deviceId, onProgress)
         val address: String
         try {
-            publish(sdkDevice, "ONVIF static IP (DP 241)", """{"241":"1"}""")
-            // Turn ONVIF off and back on first with a settle delay so the camera starts its ONVIF service cleanly.
-            publish(sdkDevice, "ONVIF switch off (DP 237)", """{"237":false}""")
+            // The camera rejects a password change once ONVIF is already on, so set the password first.
+            onProgress("Setting the ONVIF password…")
+            changePassword(camera, oldPassword, password, savePassword)
+            Log.d(TAG, "DP238 confirmed res=ok, turning ONVIF on")
+            onProgress("Turning ONVIF on…")
+            publish(camera, "ONVIF switch (DP 237)", """{"237":true}""")
+            awaitDp(camera, "ONVIF switch on confirmation (DP 237)", "237", true)
+            // The camera only (re)starts its ONVIF and RTSP servers when the IP mode actually changes, so flip it to
+            // the other mode and back. Forcing dynamic then static does nothing on the first step when the camera is
+            // already dynamic, and it would leave a dynamic camera on static.
+            val mode = readDp(camera, "ONVIF IP mode read (DP 241)", "241")
+            if (mode != "0" && mode != "1") {
+                throw CameraOnvifException("ONVIF IP mode read (DP 241)", "camera reported IP mode '$mode', expected 0 or 1")
+            }
+            val flipped = if (mode == "0") "1" else "0"
+            onProgress("Toggling the camera's IP mode to start ONVIF…")
+            publish(camera, "ONVIF IP mode toggle (DP 241)", """{"241":"$flipped"}""")
+            awaitDp(camera, "ONVIF IP mode toggle confirmation (DP 241)", "241", flipped)
             delay(1500)
-            publish(sdkDevice, "ONVIF switch (DP 237)", """{"237":true}""")
+            onProgress("Restoring the camera's IP mode…")
+            publish(camera, "ONVIF IP mode restore (DP 241)", """{"241":"$mode"}""")
+            awaitDp(camera, "ONVIF IP mode restore confirmation (DP 241)", "241", mode)
             delay(1500)
-            changePassword(sdkDevice, oldPassword, password, savePassword)
-            Log.d(TAG, "DP238 confirmed res=ok, verifying ONVIF state")
-            address = verifyState(sdkDevice)
+            onProgress("Waiting for the camera to report its ONVIF address…")
+            address = verifyState(camera)
         } catch (e: CameraOnvifException) {
-            if (existingPassword != null) throw e
             val message = checkNotNull(e.message)
             val sanitized = message.replace(password, "[redacted]")
             if (sanitized == message) throw e
             // The cause is omitted: it carries the unredacted message and would leak the new password into crash logs.
             throw CameraOnvifException(e.stage, sanitized.removePrefix("${e.stage}: "))
         } finally {
-            sdkDevice.onDestroy()
+            camera.sdk.onDestroy()
         }
+        onProgress("Checking both RTSP streams at $address…")
         val mainUrl = "rtsp://$address:8554/stream0"
         val subUrl = "rtsp://$address:8554/stream1"
         val (mainInfo, subInfo) = withContext(Dispatchers.IO) {
@@ -72,12 +89,23 @@ class CameraOnvifRepository {
             mainCodec = mainInfo.codec,
             mainResolution = mainInfo.resolution,
             subCodec = subInfo.codec,
-            subResolution = subInfo.resolution
+            subResolution = subInfo.resolution,
+            verified = true
         )
     }
 
+    // A null password means no ONVIF password was ever sent to this camera, so it still has the factory default.
+    fun unverifiedRecord(device: ActivatedDevice, address: String, knownPassword: String?) = OnvifRecord(
+        deviceId = device.deviceId,
+        address = address,
+        password = knownPassword ?: DEFAULT_PASSWORD,
+        mainUrl = "rtsp://$address:$RTSP_PORT/stream0",
+        subUrl = "rtsp://$address:$RTSP_PORT/stream1",
+        verified = false
+    )
+
     private suspend fun changePassword(
-        sdkDevice: IThingDevice,
+        camera: Camera,
         oldPassword: String,
         password: String,
         savePassword: suspend (String) -> Unit
@@ -123,12 +151,12 @@ class CameraOnvifRepository {
             override fun onNetworkStatusChanged(devId: String, status: Boolean) = Unit
             override fun onDevInfoUpdate(devId: String) = Unit
         }
-        sdkDevice.registerDevListener(listener)
+        camera.sdk.registerDevListener(listener)
         try {
             // Persist before sending: a publish that errors or times out may still have been applied by the camera.
             savePassword(password)
             publish(
-                sdkDevice,
+                camera,
                 "ONVIF password (DP 238)",
                 JSON.toJSONString(
                     mapOf(
@@ -136,7 +164,7 @@ class CameraOnvifRepository {
                     )
                 )
             )
-            awaitCallback("ONVIF password read (DP 238)") { callback -> sdkDevice.getDpList(listOf("238"), callback) }
+            awaitCallback(camera, "ONVIF password read (DP 238)") { callback -> camera.sdk.getDpList(listOf("238"), callback) }
             try {
                 withTimeout(SDK_TIMEOUT_MS) { result.await() }
             } catch (e: TimeoutCancellationException) {
@@ -149,96 +177,112 @@ class CameraOnvifRepository {
             }
             throw e
         } finally {
-            sdkDevice.unRegisterDevListener()
+            camera.sdk.unRegisterDevListener()
         }
     }
 
-    private suspend fun publish(sdkDevice: IThingDevice, stage: String, payload: String) {
+    private class Camera(val sdk: IThingDevice, val deviceId: String, val onProgress: (String) -> Unit)
+
+    private suspend fun publish(camera: Camera, stage: String, payload: String) {
         Log.d(TAG, "publish start: $stage")
-        awaitCallback(stage) { callback -> sdkDevice.publishDps(payload, callback) }
+        awaitCallback(camera, stage) { callback -> camera.sdk.publishDps(payload, callback) }
     }
 
-    private suspend fun awaitCallback(stage: String, start: (IResultCallback) -> Unit) {
-        try {
-            withTimeout(SDK_TIMEOUT_MS) {
-                suspendCancellableCoroutine<Unit> { continuation ->
-                    start(object : IResultCallback {
-                        override fun onError(code: String, error: String) {
-                            Log.e(TAG, "callback error: $stage code=$code")
-                            continuation.resumeWithException(CameraOnvifException(stage, "code $code: $error"))
-                        }
-
-                        override fun onSuccess() {
-                            Log.d(TAG, "callback success: $stage")
-                            continuation.resume(Unit)
-                        }
-                    })
-                }
-            }
-        } catch (e: TimeoutCancellationException) {
-            throw CameraOnvifException(stage, "SDK callback timed out after ${SDK_TIMEOUT_MS / 1000}s", e)
+    private fun deviceBean(camera: Camera) =
+        checkNotNull(ThingHomeSdk.getDataInstance().getDeviceBean(camera.deviceId)) {
+            "Tuya SDK has no device bean for ${camera.deviceId}"
         }
+
+    private fun isOnline(camera: Camera): Boolean = deviceBean(camera).isOnline == true
+
+    // Changing the IP mode makes the camera drop off briefly; any SDK call sent meanwhile fails with 11005.
+    private suspend fun awaitOnline(camera: Camera, stage: String) {
+        if (isOnline(camera)) return
+        Log.d(TAG, "camera offline before: $stage")
+        camera.onProgress("The camera is reconnecting to Tuya. Waiting for it to come back online…")
+        // OrNull, not withTimeout: an enclosing timeout must propagate instead of being reported as this one.
+        withTimeoutOrNull(ONLINE_TIMEOUT_MS) {
+            while (!isOnline(camera)) delay(1000)
+        } ?: throw CameraOnvifException(stage, "camera stayed offline for ${ONLINE_TIMEOUT_MS / 1000}s")
+        Log.d(TAG, "camera back online before: $stage")
     }
 
-    private suspend fun verifyState(sdkDevice: IThingDevice): String {
-        val stage = "ONVIF state verification"
-        val result = CompletableDeferred<String>()
-        val seen = mutableMapOf<String, Any?>()
-        val listener = object : IDevListener {
-            override fun onDpUpdate(devId: String, dpStr: String) {
-                seen.putAll(JSON.parseObject(dpStr))
-                Log.d(TAG, "verify update: 237=${seen["237"]} 239=${seen["239"]} 240=${seen["240"]}")
-                if (seen["237"] == true && seen["239"] == true) {
-                    val ip = seen["240"] as? String
-                    if (ip != null && HomeAssistantProtocol.isRfc1918Address(ip)) result.complete(ip)
-                }
-            }
-
-            override fun onRemoved(devId: String) {
-                result.completeExceptionally(CameraOnvifException(stage, "device removed"))
-            }
-
-            override fun onStatusChanged(devId: String, online: Boolean) = Unit
-            override fun onNetworkStatusChanged(devId: String, status: Boolean) = Unit
-            override fun onDevInfoUpdate(devId: String) = Unit
-        }
-        sdkDevice.registerDevListener(listener)
-        try {
-            Log.d(TAG, "verify start")
-            try {
-                return withTimeout(SDK_TIMEOUT_MS) {
-                    val poller = launchPoll(sdkDevice, stage, seen)
-                    try {
-                        result.await()
-                    } finally {
-                        poller.cancel()
+    private suspend fun awaitCallback(camera: Camera, stage: String, start: (IResultCallback) -> Unit) {
+        awaitOnline(camera, stage)
+        withTimeoutOrNull(SDK_TIMEOUT_MS) {
+            suspendCancellableCoroutine<Unit> { continuation ->
+                start(object : IResultCallback {
+                    override fun onError(code: String, error: String) {
+                        Log.e(TAG, "callback error: $stage code=$code")
+                        continuation.resumeWithException(CameraOnvifException(stage, "code $code: $error"))
                     }
-                }
-            } catch (e: TimeoutCancellationException) {
-                Log.e(TAG, "verify timed out: 237=${seen["237"]} 239=${seen["239"]} 240=${seen["240"]}")
-                throw CameraOnvifException(
-                    stage,
-                    "timed out waiting for 237=true, 239=true and private IPv4 in 240; last seen: " +
-                        "237=${seen["237"]}, 239=${seen["239"]}, 240=${seen["240"]}",
-                    e
-                )
+
+                    override fun onSuccess() {
+                        Log.d(TAG, "callback success: $stage")
+                        continuation.resume(Unit)
+                    }
+                })
             }
-        } finally {
-            sdkDevice.unRegisterDevListener()
-        }
+        } ?: throw CameraOnvifException(stage, "SDK callback timed out after ${SDK_TIMEOUT_MS / 1000}s")
     }
 
-    private fun CoroutineScope.launchPoll(
-        sdkDevice: IThingDevice,
-        stage: String,
-        seen: Map<String, Any?>
-    ) = launch {
-        while (true) {
-            if (seen["237"] == false) {
-                publish(sdkDevice, "ONVIF switch (DP 237)", """{"237":true}""")
+    private suspend fun readDp(camera: Camera, stage: String, dp: String): String {
+        awaitCallback(camera, stage) { callback -> camera.sdk.getDpList(listOf(dp), callback) }
+        return deviceBean(camera).dps[dp]?.toString()
+            ?: throw CameraOnvifException(stage, "camera reported no value for DP $dp")
+    }
+
+    private suspend fun awaitDp(camera: Camera, stage: String, dp: String, expected: Any) {
+        var last: Any? = null
+        withTimeoutOrNull(STATE_TIMEOUT_MS) {
+            while (true) {
+                awaitCallback(camera, stage) { callback -> camera.sdk.getDpList(listOf(dp), callback) }
+                last = deviceBean(camera).dps[dp]
+                Log.d(TAG, "$stage: $dp=$last")
+                if (last == expected) break
+                delay(1000)
             }
-            awaitCallback(stage) { callback -> sdkDevice.getDpList(listOf("237", "239", "240"), callback) }
-            delay(2000)
+        } ?: throw CameraOnvifException(stage, "timed out waiting for $dp=$expected; last seen $dp=$last")
+    }
+
+    // getDpList refreshes the SDK's cached DPs but fires no update for unchanged values, so read the cache.
+    // The IP-mode cycle can move the camera to a new DHCP address, so DP 240 counts only once RTSP answers there.
+    private suspend fun verifyState(camera: Camera): String {
+        val stage = "ONVIF state verification"
+        var last = "nothing read yet"
+        Log.d(TAG, "verify start")
+        val address = withTimeoutOrNull(STATE_TIMEOUT_MS) {
+            var found: String? = null
+            while (found == null) {
+                awaitCallback(camera, stage) { callback ->
+                    camera.sdk.getDpList(listOf("237", "239", "240"), callback)
+                }
+                val dps = deviceBean(camera).dps
+                val ip = dps["240"] as? String
+                val reachable = ip != null && HomeAssistantProtocol.isRfc1918Address(ip) && rtspReachable(ip)
+                last = "237=${dps["237"]}, 239=${dps["239"]}, 240=$ip, RTSP reachable=$reachable"
+                Log.d(TAG, "verify read: $last")
+                if (dps["237"] == true && dps["239"] == true && reachable) {
+                    found = ip
+                } else {
+                    if (dps["237"] == false) publish(camera, "ONVIF switch (DP 237)", """{"237":true}""")
+                    delay(2000)
+                }
+            }
+            found
+        }
+        return address ?: throw CameraOnvifException(
+            stage,
+            "timed out waiting for 237=true, 239=true and RTSP on the private IPv4 in 240; last seen: $last"
+        )
+    }
+
+    private suspend fun rtspReachable(address: String): Boolean = withContext(Dispatchers.IO) {
+        try {
+            Socket().use { it.connect(InetSocketAddress(address, RTSP_PORT), 2000) }
+            true
+        } catch (e: java.io.IOException) {
+            false
         }
     }
 
@@ -398,13 +442,18 @@ class CameraOnvifRepository {
         return buildString { repeat(length) { append(ALPHABET[random.nextInt(ALPHABET.length)]) } }
     }
 
-    private companion object {
-        const val TAG = "CameraOnvif"
+    companion object {
+        // admin is the factory ONVIF password. A reboot keeps the current password; only a factory reset returns to this.
         const val DEFAULT_PASSWORD = "admin"
+
+        private const val TAG = "CameraOnvif"
         const val USERNAME = "admin"
         const val PASSWORD_LENGTH = 20
         const val ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
         const val SDK_TIMEOUT_MS = 15_000L
+        const val ONLINE_TIMEOUT_MS = 60_000L
+        // Confirmation waits include a possible reconnect while the camera is offline.
+        const val STATE_TIMEOUT_MS = ONLINE_TIMEOUT_MS + SDK_TIMEOUT_MS
         const val RTSP_PORT = 8554
         const val RTSP_TIMEOUT_MS = 10_000
     }

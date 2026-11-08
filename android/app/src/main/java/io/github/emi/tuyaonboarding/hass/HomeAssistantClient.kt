@@ -113,7 +113,7 @@ class HomeAssistantClient(
         val protocolVersion = device.protocolVersion?.trim()
             ?.takeIf { HomeAssistantProtocol.isSupportedProtocolVersion(it) }
             ?: "auto"
-        val existingId = findTuyaLocalEntryId(session, device)
+        val existingId = findTuyaLocalEntryId(session, device.deviceId)
         if (existingId != null) {
             updateTuyaLocalOptions(existingId, host, device.localKey, protocolVersion)
             session.callCommand("config_entries/update", mapOf("entry_id" to existingId, "title" to device.name))
@@ -177,17 +177,48 @@ class HomeAssistantClient(
         return awaitLoadedEntry(session, device, ImportOutcome.ADDED)
     }
 
-    private fun findTuyaLocalEntryId(session: WebSocketSession, device: ActivatedDevice): String? {
-        val response = session.callCommand("config_entries/get")
-        val entries = response.getJSONArray("result")
+    fun tuyaLocalEntryId(deviceId: String): String? =
+        openVerifiedSession().use { session -> findTuyaLocalEntryId(session, deviceId) }
+
+    // The host Tuya Local connects to. Entry data is not exposed over the API, but the options form defaults
+    // to the entry's current host, so the flow is opened, read and deleted without changing anything.
+    fun tuyaLocalHost(deviceId: String): String? {
+        val entryId = tuyaLocalEntryId(deviceId) ?: return null
+        val form = postFlow("/api/config/config_entries/options/flow", mapOf("handler" to entryId))
+        val flowId = form.getString("flow_id") ?: throw invalidResponse("Home Assistant returned no Tuya Local options flow ID.")
+        try {
+            requireFlowStep(form, "user")
+            val schema = form.getJSONArray("data_schema") ?: throw invalidResponse("The Tuya Local options form has no schema.")
+            val host = (0 until schema.size).map { schema.getJSONObject(it) }.single { it.getString("name") == "host" }
+            return host.getString("default") ?: throw invalidResponse("The Tuya Local options form has no current host.")
+        } finally {
+            httpRequest("DELETE", "/api/config/config_entries/options/flow/$flowId", null)
+        }
+    }
+
+    // Entry summaries from config_entries/get carry no unique_id, so match on the device registry identifier
+    // tuya-local registers: ("tuya_local", <device id>), then keep the device's tuya_local entry.
+    private fun findTuyaLocalEntryId(session: WebSocketSession, deviceId: String): String? {
+        val entries = session.callCommand("config_entries/get").getJSONArray("result")
             ?: throw invalidResponse("Home Assistant returned no config-entry list.")
-        for (index in 0 until entries.size) {
-            val entry = entries.getJSONObject(index)
-            if (entry.getString("domain") != "tuya_local") continue
-            val uniqueId = entry.getString("unique_id")
-            if (uniqueId == device.deviceId) {
-                return entry.getString("entry_id")
+        val tuyaLocalEntries = (0 until entries.size)
+            .map { entries.getJSONObject(it) }
+            .filter { it.getString("domain") == "tuya_local" }
+            .map { checkNotNull(it.getString("entry_id")) { "A tuya_local config entry has no entry ID" } }
+            .toSet()
+        val devices = session.callCommand("config/device_registry/list").getJSONArray("result")
+            ?: throw invalidResponse("Home Assistant returned no device registry.")
+        for (index in 0 until devices.size) {
+            val device = devices.getJSONObject(index)
+            val identifiers = device.getJSONArray("identifiers") ?: continue
+            val matches = (0 until identifiers.size).any { i ->
+                val pair = identifiers.getJSONArray(i)
+                pair.getString(0) == "tuya_local" && pair.getString(1) == deviceId
             }
+            if (!matches) continue
+            val deviceEntries = device.getJSONArray("config_entries")
+                ?: throw invalidResponse("A Home Assistant device has no config entries.")
+            return (0 until deviceEntries.size).map { deviceEntries.getString(it) }.single { it in tuyaLocalEntries }
         }
         return null
     }

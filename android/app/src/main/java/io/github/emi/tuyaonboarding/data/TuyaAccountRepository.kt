@@ -74,7 +74,8 @@ class TuyaAccountRepository(context: Context, private val store: SecureSettingsS
                         name = name,
                         productId = productId,
                         protocolVersion = it.pv,
-                        category = it.category,
+                        // Home-list beans leave `category` empty; `deviceCategory` carries the code (e.g. "sp").
+                        category = it.deviceCategory,
                         ip = it.ip
                     )
                 )
@@ -93,7 +94,7 @@ class TuyaAccountRepository(context: Context, private val store: SecureSettingsS
         }
     }
 
-    private suspend fun signIn(account: TuyaAccount) {
+    suspend fun signIn(account: TuyaAccount) {
         val countryCode = CountryCodeProvider.current(appContext)
         suspendCancellableCoroutine { cont ->
             ThingHomeSdk.getUserInstance().loginOrRegisterWithUid(

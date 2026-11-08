@@ -10,7 +10,11 @@ data class AppSettings(
     val adminToken: String = "",
     val countryCode: String = "55",
     val homeWifiSsid: String = "",
-    val homeWifiPassword: String = ""
+    val homeWifiPassword: String = "",
+    val feedDestination: String = "tuya_local",
+    val go2rtcUrl: String = "",
+    val go2rtcUsername: String = "",
+    val go2rtcPassword: String = ""
 )
 
 data class ActivatedDevice(
@@ -41,12 +45,13 @@ data class OnvifRecord(
     val mainCodec: String? = null,
     val mainResolution: String? = null,
     val subCodec: String? = null,
-    val subResolution: String? = null
+    val subResolution: String? = null,
+    val verified: Boolean
 ) {
     override fun toString() =
         "OnvifRecord(deviceId=$deviceId, address=$address, password=[redacted], " +
             "mainUrl=[redacted], subUrl=[redacted], destination=$destination, registered=$registered, " +
-            "mainCodec=$mainCodec, mainResolution=$mainResolution, subCodec=$subCodec, subResolution=$subResolution)"
+            "mainCodec=$mainCodec, mainResolution=$mainResolution, subCodec=$subCodec, subResolution=$subResolution, verified=$verified)"
 }
 
 enum class ImportState {
@@ -78,7 +83,11 @@ class SecureSettingsStore(context: Context) {
         adminToken = preferences.getString(KEY_ADMIN_TOKEN, "").orEmpty(),
         countryCode = preferences.getString(KEY_COUNTRY_CODE, "55").orEmpty(),
         homeWifiSsid = preferences.getString(KEY_WIFI_SSID, "").orEmpty(),
-        homeWifiPassword = preferences.getString(KEY_WIFI_PASSWORD, "").orEmpty()
+        homeWifiPassword = preferences.getString(KEY_WIFI_PASSWORD, "").orEmpty(),
+        feedDestination = preferences.getString(KEY_FEED_DESTINATION, "tuya_local").orEmpty(),
+        go2rtcUrl = preferences.getString(KEY_GO2RTC_URL, "").orEmpty(),
+        go2rtcUsername = preferences.getString(KEY_GO2RTC_USERNAME, "").orEmpty(),
+        go2rtcPassword = preferences.getString(KEY_GO2RTC_PASSWORD, "").orEmpty()
     )
 
     fun saveSettings(settings: AppSettings) {
@@ -88,6 +97,10 @@ class SecureSettingsStore(context: Context) {
             .putString(KEY_COUNTRY_CODE, settings.countryCode)
             .putString(KEY_WIFI_SSID, settings.homeWifiSsid)
             .putString(KEY_WIFI_PASSWORD, settings.homeWifiPassword)
+            .putString(KEY_FEED_DESTINATION, settings.feedDestination)
+            .putString(KEY_GO2RTC_URL, settings.go2rtcUrl)
+            .putString(KEY_GO2RTC_USERNAME, settings.go2rtcUsername)
+            .putString(KEY_GO2RTC_PASSWORD, settings.go2rtcPassword)
             .commit()
         check(committed) { "Unable to persist encrypted settings" }
     }
@@ -167,7 +180,9 @@ class SecureSettingsStore(context: Context) {
             mainCodec = preferences.getString(onvifKey(deviceId, "main_codec"), null),
             mainResolution = preferences.getString(onvifKey(deviceId, "main_resolution"), null),
             subCodec = preferences.getString(onvifKey(deviceId, "sub_codec"), null),
-            subResolution = preferences.getString(onvifKey(deviceId, "sub_resolution"), null)
+            subResolution = preferences.getString(onvifKey(deviceId, "sub_resolution"), null),
+            // Records stored before this flag existed were only ever saved after full verification.
+            verified = preferences.getBoolean(onvifKey(deviceId, "verified"), true)
         )
     }
 
@@ -194,6 +209,7 @@ class SecureSettingsStore(context: Context) {
             .putString(onvifKey(record.deviceId, "main_resolution"), record.mainResolution)
             .putString(onvifKey(record.deviceId, "sub_codec"), record.subCodec)
             .putString(onvifKey(record.deviceId, "sub_resolution"), record.subResolution)
+            .putBoolean(onvifKey(record.deviceId, "verified"), record.verified)
             .commit()
         check(committed) { "Unable to persist ONVIF record" }
     }
@@ -242,21 +258,6 @@ class SecureSettingsStore(context: Context) {
         check(committed) { "Unable to persist encrypted device record" }
     }
 
-    fun deletePendingDevice() {
-        val committed = preferences.edit()
-            .remove(KEY_DEVICE_ID)
-            .remove(KEY_LOCAL_KEY)
-            .remove(KEY_DEVICE_NAME)
-            .remove(KEY_PRODUCT_ID)
-            .remove(KEY_PROTOCOL_VERSION)
-            .remove(KEY_CATEGORY)
-            .remove(KEY_IP)
-            .remove(KEY_IMPORT_STATE)
-            .remove(KEY_LAST_ERROR)
-            .commit()
-        check(committed) { "Unable to delete encrypted device record" }
-    }
-
     fun updatePendingDeviceState(state: ImportState, lastError: String? = null) {
         val current = checkNotNull(loadPendingDevice()) { "No pending device record" }
         savePendingDevice(current.copy(state = state, lastError = lastError))
@@ -291,6 +292,10 @@ class SecureSettingsStore(context: Context) {
         const val KEY_COUNTRY_CODE = "country_code"
         const val KEY_WIFI_SSID = "home_wifi_ssid"
         const val KEY_WIFI_PASSWORD = "home_wifi_password"
+        const val KEY_FEED_DESTINATION = "feed_destination"
+        const val KEY_GO2RTC_URL = "go2rtc_url"
+        const val KEY_GO2RTC_USERNAME = "go2rtc_username"
+        const val KEY_GO2RTC_PASSWORD = "go2rtc_password"
         const val KEY_TUYA_UID = "tuya_uid"
         const val KEY_TUYA_PASSWORD = "tuya_password"
         const val KEY_CAMERA_EMAIL = "camera_account_email"
