@@ -25,13 +25,14 @@ The phone and Home Assistant need to be on the same network. Pairing uses the in
 
 ## Tuya security cameras
 
-Stock Tuya Local will take the camera and its controls, but it will not play the video on that same HASS device. This repo contains a patched copy of Tuya Local that does: main stream, substream, and the pan controls, all in one device.
+Stock Tuya Local will take the camera and its controls, but it will not play the video on that same HASS device. This repo contains an overlay that adds it: main stream, substream, and the pan controls, all in one device.
 
-1. Copy `tuya-local/custom_components/tuya_local` to `config/custom_components/tuya_local` on the Home Assistant machine, over the copy you have.
-2. Restart Home Assistant.
-3. Pair the camera in the app.
+1. Install stock [Tuya Local](https://github.com/make-all/tuya-local) first. The overlay is only the changed files, not a full integration.
+2. Copy `tuya-local/custom_components/tuya_local/` from this repo over `config/custom_components/tuya_local/` on the Home Assistant machine.
+3. Restart Home Assistant.
+4. Pair the camera in the app.
 
-The username is `admin`. The patched integration is tuya-local 2026.10.0 plus the stream wiring, and it keeps that project's license in `tuya-local/LICENSE.md`. Without the patch the app still adds the video but as separate Generic Camera entries.
+The username is `admin`. The overlay is based on tuya-local 2026.10.0 and keeps that project's license in `tuya-local/LICENSE.md`. Details in `tuya-local/README.md`. Without it the app still adds the video but as separate Generic Camera entries.
 
 ## Build
 
