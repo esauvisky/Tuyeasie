@@ -55,3 +55,7 @@ Pushing a `v*` tag whose commit is contained in `main` builds, signs, and attach
 ## Home Assistant
 
 The app expects a Home Assistant administrator long-lived access token and the extended `tuya-local` integration from this repository. Day-to-day device control after import is local; activation and camera stream registration can require internet access.
+
+## License
+
+Tuyeasie is released under the [MIT license](LICENSE). The bundled `tuya-local` integration keeps its own license, in `tuya-local/LICENSE.md`.
