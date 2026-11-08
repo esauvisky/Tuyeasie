@@ -39,30 +39,24 @@ jobs:
           TUYA_APP_SECRET: ${{ secrets.TUYA_APP_SECRET }}
         run: printf 'appKey=%s\nappSecret=%s\n' "$TUYA_APP_KEY" "$TUYA_APP_SECRET" > android/local.properties
 
-      - name: Build unsigned release APK
-        working-directory: android
-        run: ./gradlew assembleRelease
-
-      - name: Sign release APK
+      - name: Decode the release keystore
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        working-directory: android
         run: |
-          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.keystore"
-          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
-          mkdir -p release
-          "$APKSIGNER" sign \
-            --ks "$RUNNER_TEMP/release.keystore" \
-            --ks-key-alias "$ANDROID_KEY_ALIAS" \
-            --ks-pass "pass:$ANDROID_KEYSTORE_PASSWORD" \
-            --key-pass "pass:$ANDROID_KEY_PASSWORD" \
-            --out "release/tuyeasie-$GITHUB_REF_NAME.apk" \
-            android/app/build/outputs/apk/release/app-release-unsigned.apk
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > release.keystore
+          printf 'storeFile=release.keystore\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+            "$ANDROID_KEYSTORE_PASSWORD" "$ANDROID_KEY_ALIAS" "$ANDROID_KEY_PASSWORD" > keystore.properties
+
+      - name: Build the signed release APK
+        working-directory: android
+        run: ./gradlew assembleRelease
 
       - name: Upload APK to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          files: release/tuyeasie-${{ github.ref_name }}.apk
+          files: android/app/build/outputs/apk/release/app-release.apk
