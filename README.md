@@ -4,7 +4,7 @@ Local-first Tuya device onboarding for Home Assistant.
 
 Tuyeasie pairs Tuya devices from an Android phone, extracts their local credentials, and imports them into the included `tuya-local` integration. It supports Wi-Fi access-point provisioning and Bluetooth-assisted pairing for Wi-Fi + BLE combo devices, without requiring the official Tuya app for normal setup.
 
-[Pairing a camera into Home Assistant](demo/pairing.mp4) (2m36s). The clip starts on the Pair tab, pairs a camera over Bluetooth, and ends on the device page in Home Assistant with the Tuya Local controls.
+[Pairing a camera into Home Assistant](demo/pairing.mp4) (1m18s, played at double speed). The clip starts on the Pair tab, pairs a camera over Bluetooth, and ends on the device page in Home Assistant with the Tuya Local controls.
 
 ## Features
 
