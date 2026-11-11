@@ -53,7 +53,14 @@ fun DevicesScreen(
             if (state.accounts.isNotEmpty() && state.accounts.none { it.loading } && devices.isEmpty()) CardText("No devices yet.")
             devices.forEach { (entry, device) ->
                 EntityRow(
-                    icon = { EntityIcon(categoryIcon(device.activated.category), RowTone.NEUTRAL, busy = state.unpairingDeviceId == device.deviceId) },
+                    icon = {
+                        EntityIcon(
+                            categoryIcon(device.activated.category),
+                            RowTone.NEUTRAL,
+                            imageUrl = device.iconUrl,
+                            busy = state.unpairingDeviceId == device.deviceId
+                        )
+                    },
                     title = device.name,
                     state = listOfNotNull(lanAddress(device.activated.ip), entry.saved.kind.label, device.homeName).joinToString(" · "),
                     enabled = configureEnabled && state.unpairingDeviceId == null && !entry.loading,

@@ -24,6 +24,7 @@ data class TuyaManagedDevice(
     val name: String,
     val productId: String,
     val homeName: String,
+    val iconUrl: String?,
     val activated: ActivatedDevice
 )
 
@@ -68,6 +69,7 @@ class TuyaAccountRepository(context: Context, private val store: SecureSettingsS
                     name = name,
                     productId = productId,
                     homeName = home.name,
+                    iconUrl = it.iconUrl,
                     activated = ActivatedDevice(
                         deviceId = deviceId,
                         localKey = it.localKey,
