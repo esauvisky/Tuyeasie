@@ -186,6 +186,14 @@ class SecureSettingsStore(context: Context) {
         )
     }
 
+    fun loadOnvifRecords(): List<OnvifRecord> =
+        preferences.all.keys
+            .filter { it.startsWith(ONVIF_PREFIX) && it.endsWith(ONVIF_ADDRESS_SUFFIX) }
+            .map { key ->
+                val deviceId = key.removePrefix(ONVIF_PREFIX).removeSuffix(ONVIF_ADDRESS_SUFFIX)
+                checkNotNull(loadOnvifRecord(deviceId)) { "ONVIF record for $deviceId vanished while loading" }
+            }
+
     fun loadPendingOnvifPassword(deviceId: String): String? =
         preferences.getString(onvifKey(deviceId, "pending_password"), null)
 
@@ -303,6 +311,7 @@ class SecureSettingsStore(context: Context) {
         const val KEY_EXTRA_ACCOUNTS = "extra_tuya_accounts"
         const val KEY_EXTRA_PASSWORD_PREFIX = "extra_tuya_password_"
         const val ONVIF_PREFIX = "onvif_"
+        const val ONVIF_ADDRESS_SUFFIX = "_address"
         const val KEY_DEVICE_ID = "device_id"
         const val KEY_LOCAL_KEY = "device_local_key"
         const val KEY_DEVICE_NAME = "device_name"

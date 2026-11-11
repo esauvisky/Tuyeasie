@@ -1,14 +1,18 @@
 package com.emi.tuyeasie.ui
 
 import android.app.Application
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.emi.tuyeasie.data.BackupExporter
 import com.emi.tuyeasie.data.SavedTuyaAccount
 import com.emi.tuyeasie.data.SecureSettingsStore
 import com.emi.tuyeasie.data.TuyaAccountKind
 import com.emi.tuyeasie.data.TuyaAccountRepository
 import com.emi.tuyeasie.data.TuyaManagedDevice
 import com.emi.tuyeasie.data.TuyaSdkException
+import java.io.IOException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -16,6 +20,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 data class AccountDevicesState(
     val saved: SavedTuyaAccount,
@@ -38,12 +43,21 @@ data class MyDevicesUiState(
     val addError: String? = null,
     val confirmation: MyDevicesConfirmation? = null,
     val unpairingDeviceId: String? = null,
-    val actionError: String? = null
+    val actionError: String? = null,
+    val backupDialogOpen: Boolean = false,
+    val backupPassphrase: String = "",
+    val backupPassphraseConfirm: String = "",
+    val exportingBackup: Boolean = false,
+    val backupError: String? = null,
+    val backupExported: Boolean = false
 )
+
+const val MIN_BACKUP_PASSPHRASE_LENGTH = 8
 
 class MyDevicesViewModel(application: Application) : AndroidViewModel(application) {
     private val store = SecureSettingsStore(application)
     private val repository = TuyaAccountRepository(application, store)
+    private val backupExporter = BackupExporter(store)
     // The Tuya SDK holds a single signed-in user, so sign-in + operation pairs must not interleave.
     private val sdkLock = Mutex()
     private val _uiState = MutableStateFlow(MyDevicesUiState())
@@ -151,6 +165,60 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
             }
             _uiState.update { it.copy(unpairingDeviceId = null) }
             refresh()
+        }
+    }
+
+    fun openBackupDialog() = _uiState.update {
+        it.copy(
+            backupDialogOpen = true,
+            backupPassphrase = "",
+            backupPassphraseConfirm = "",
+            backupError = null,
+            backupExported = false
+        )
+    }
+
+    fun dismissBackupDialog() = _uiState.update {
+        it.copy(backupDialogOpen = false, backupPassphrase = "", backupPassphraseConfirm = "")
+    }
+
+    fun onBackupPassphraseChange(value: String) = _uiState.update { it.copy(backupPassphrase = value) }
+
+    fun onBackupPassphraseConfirmChange(value: String) = _uiState.update { it.copy(backupPassphraseConfirm = value) }
+
+    /** Closes the dialog but keeps the passphrase until the file picker returns. */
+    fun startBackupExport() {
+        val state = _uiState.value
+        check(state.backupPassphrase.length >= MIN_BACKUP_PASSPHRASE_LENGTH) { "Backup passphrase too short" }
+        check(state.backupPassphrase == state.backupPassphraseConfirm) { "Backup passphrases differ" }
+        _uiState.update { it.copy(backupDialogOpen = false) }
+    }
+
+    fun onBackupFileChosen(uri: Uri?) {
+        val passphrase = _uiState.value.backupPassphrase
+        _uiState.update { it.copy(backupPassphrase = "", backupPassphraseConfirm = "") }
+        if (uri == null) return
+        // The passphrase only lives in memory, so it is gone if Android killed the app while the picker was open.
+        if (passphrase.isEmpty()) {
+            _uiState.update { it.copy(backupError = "The app restarted while choosing the file. Export the backup again.") }
+            return
+        }
+        val accounts = repository.savedAccounts()
+        _uiState.update { it.copy(exportingBackup = true, backupError = null, backupExported = false) }
+        viewModelScope.launch {
+            val json = withContext(Dispatchers.Default) { backupExporter.export(passphrase, accounts) }
+            try {
+                withContext(Dispatchers.IO) {
+                    val output = checkNotNull(getApplication<Application>().contentResolver.openOutputStream(uri, "wt")) {
+                        "No output stream for $uri"
+                    }
+                    output.use { it.write(json.toByteArray(Charsets.UTF_8)) }
+                }
+            } catch (e: IOException) {
+                _uiState.update { it.copy(exportingBackup = false, backupError = "Could not write the backup: ${e.message}") }
+                return@launch
+            }
+            _uiState.update { it.copy(exportingBackup = false, backupExported = true) }
         }
     }
 }
