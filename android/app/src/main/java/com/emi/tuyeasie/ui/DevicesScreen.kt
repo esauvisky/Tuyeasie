@@ -38,7 +38,7 @@ fun DevicesScreen(
     padding: PaddingValues
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
-    val devices = state.accounts.flatMap { entry -> entry.devices.orEmpty().map { entry to it } }
+    val devices = withUniqueNames(state.accounts.flatMap { entry -> entry.devices.orEmpty().map { entry to it } })
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(padding).padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -70,6 +70,34 @@ fun DevicesScreen(
         }
     }
     state.confirmation?.let { ConfirmationDialog(it, viewModel::confirm, viewModel::dismissConfirmation) }
+}
+
+// Numbering follows device ID so a device keeps its suffix across refreshes; the name also reaches Home Assistant.
+private fun withUniqueNames(
+    devices: List<Pair<AccountDevicesState, TuyaManagedDevice>>
+): List<Pair<AccountDevicesState, TuyaManagedDevice>> {
+    val taken = devices.map { it.second.name }.toMutableSet()
+    val renamed = devices.map { it.second }
+        .groupBy { it.name }
+        .filterValues { it.size > 1 }
+        .flatMap { (name, group) ->
+            var number = 0
+            group.sortedBy { it.deviceId }.map { device ->
+                var candidate: String
+                do {
+                    number++
+                    candidate = "$name $number"
+                } while (candidate in taken)
+                taken += candidate
+                device.deviceId to candidate
+            }
+        }
+        .toMap()
+    return devices.map { (entry, device) ->
+        val name = renamed[device.deviceId]
+        if (name == null) entry to device
+        else entry to device.copy(name = name, activated = device.activated.copy(name = name))
+    }
 }
 
 @Composable
