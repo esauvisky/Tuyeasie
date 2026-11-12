@@ -196,7 +196,11 @@ private fun OnboardingUiState.withoutCameraState() = copy(
     mainError = null,
     subError = null,
     mainEntryId = null,
-    subEntryId = null
+    subEntryId = null,
+    networkReport = null,
+    scanStatus = ScanStatus.IDLE,
+    scanProgress = null,
+    scanError = null
 )
 
 class OnboardingViewModel(application: Application) : AndroidViewModel(application) {
@@ -874,14 +878,11 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 pendingDevice = null,
                 activatedDevice = device,
                 showLocalKey = false,
-                capabilities = capabilities,
-                networkReport = store.loadNetworkReport(device.deviceId),
-                scanStatus = ScanStatus.IDLE,
-                scanProgress = null,
-                scanError = null
+                capabilities = capabilities
             ).withoutCameraState().let { reset ->
                 val onvif = store.loadOnvifRecord(device.deviceId)
                 reset.copy(
+                    networkReport = store.loadNetworkReport(device.deviceId),
                     onvifRecord = onvif,
                     onvifStatus = when {
                         onvif == null -> OnvifStatus.IDLE
