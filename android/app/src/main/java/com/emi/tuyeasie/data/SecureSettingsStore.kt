@@ -184,8 +184,8 @@ class SecureSettingsStore(context: Context) {
             deviceId = deviceId,
             address = address,
             // Records stored before usernames were kept all used the cameras' fixed "admin" user.
-            username = preferences.getString(onvifKey(deviceId, "username"), "admin")!!,
-            password = required("password"),
+            username = preferences.getString(onvifKey(deviceId, "username"), "admin")!!.ifEmpty { "admin" },
+            password = required("password").ifEmpty { "admin" },
             mainUrl = required("main_url"),
             // Single-stream devices have no substream.
             subUrl = preferences.getString(onvifKey(deviceId, "sub_url"), null),

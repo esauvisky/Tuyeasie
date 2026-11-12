@@ -1255,12 +1255,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         val (guessed, guessedCredentials) = if (onvif == null || onvif.streams.isEmpty()) {
             PortScanner.guessRtspStreams(address.ip, rtspPorts, candidates)
         } else emptyList<DetectedStream>() to null
-        val matched = when {
-            onvif != null && !onvif.authRequired -> Credentials("", "")
-            onvif?.credentials != null -> onvif.credentials
-            guessedCredentials != null -> guessedCredentials
-            else -> null
-        }
+        val matched = onvif?.credentials ?: guessedCredentials
         val report = NetworkReport(
             ip = address.ip,
             addressSource = address.source,
