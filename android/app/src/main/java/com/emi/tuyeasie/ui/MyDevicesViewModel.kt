@@ -72,9 +72,14 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun refresh() {
         val saved = repository.savedAccounts()
+        val existingByAccount = _uiState.value.accounts.associateBy { it.saved }
         _uiState.update { state ->
             state.copy(
-                accounts = saved.map { AccountDevicesState(it, loading = true) },
+                accounts = saved.map { account ->
+                    val cached = existingByAccount[account]?.devices
+                        ?: store.loadCachedDevices(account.account.uid)
+                    AccountDevicesState(account, loading = true, devices = cached)
+                },
                 actionError = null
             )
         }
@@ -85,7 +90,9 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
 
     private suspend fun loadDevices(saved: SavedTuyaAccount) {
         val result = try {
-            Result.success(sdkLock.withLock { repository.listDevices(saved.account) })
+            val devices = sdkLock.withLock { repository.listDevices(saved.account) }
+            withContext(Dispatchers.IO) { store.saveCachedDevices(saved.account.uid, devices) }
+            Result.success(devices)
         } catch (e: TuyaSdkException) {
             Result.failure(e)
         }

@@ -54,14 +54,14 @@ fun DevicesScreen(
         HaCard(title = null) {
             state.actionError?.let { InlineError(it) }
             state.accounts.forEach { entry ->
-                if (entry.loading) StatusLine("Loading ${entry.saved.account.uid}…", busy = true)
+                if (entry.loading && entry.devices.isNullOrEmpty()) StatusLine("Loading ${entry.saved.account.uid}…", busy = true)
                 entry.error?.let { InlineError("${entry.saved.kind.label}: $it") }
             }
             if (state.accounts.isEmpty()) CardText("No Tuya accounts on this phone yet. Pair a device or add your account in Settings.")
             if (state.accounts.isNotEmpty() && state.accounts.none { it.loading } && devices.isEmpty()) CardText("No devices yet.")
             devices.forEach { (entry, device) ->
                 var menuOpen by remember { mutableStateOf(false) }
-                val enabled = configureEnabled && state.unpairingDeviceId == null && !entry.loading
+                val enabled = configureEnabled && state.unpairingDeviceId == null
                 Box {
                     EntityRow(
                         icon = {

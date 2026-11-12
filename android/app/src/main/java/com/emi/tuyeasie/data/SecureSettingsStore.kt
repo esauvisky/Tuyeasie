@@ -154,11 +154,15 @@ class SecureSettingsStore(context: Context) {
     }
 
     fun deleteGeneratedTuyaAccount() {
-        val committed = preferences.edit().remove(KEY_TUYA_UID).remove(KEY_TUYA_PASSWORD).commit()
+        val uid = preferences.getString(KEY_TUYA_UID, null)
+        val editor = preferences.edit().remove(KEY_TUYA_UID).remove(KEY_TUYA_PASSWORD)
+        if (uid != null) editor.remove(KEY_CACHED_DEVICES_PREFIX + uid)
+        val committed = editor.commit()
         check(committed) { "Unable to delete Tuya account" }
     }
 
     fun deleteCameraAccount() {
+        val uid = preferences.getString(KEY_CAMERA_EMAIL, null)
         val editor = preferences.edit()
             .remove(KEY_CAMERA_EMAIL)
             .remove(KEY_CAMERA_PASSWORD)
@@ -166,6 +170,7 @@ class SecureSettingsStore(context: Context) {
         preferences.all.keys
             .filter { it.startsWith(KEY_EXTRA_PASSWORD_PREFIX) }
             .forEach { editor.remove(it) }
+        if (uid != null) editor.remove(KEY_CACHED_DEVICES_PREFIX + uid)
         val committed = editor.commit()
         check(committed) { "Unable to delete camera account" }
     }
@@ -348,12 +353,79 @@ class SecureSettingsStore(context: Context) {
         check(committed) { "Unable to persist network report" }
     }
 
+    fun loadCachedDevices(accountUid: String): List<TuyaManagedDevice>? {
+        val raw = preferences.getString(KEY_CACHED_DEVICES_PREFIX + accountUid, null) ?: return null
+        val array = JSONArray(raw)
+        fun JSONObject.optText(name: String): String? = if (isNull(name)) null else getString(name)
+        return (0 until array.length()).map { index ->
+            val obj = array.getJSONObject(index)
+            val deviceId = obj.getString("deviceId")
+            val name = obj.getString("name")
+            val productId = obj.getString("productId")
+            val points = obj.getJSONObject("dataPoints")
+            val capabilities = DeviceCapabilities(
+                dataPoints = points.keys().asSequence().associateWith { points.getString(it) },
+                mac = obj.optText("mac"),
+                tuyaLan = obj.getBoolean("tuyaLan")
+            )
+            TuyaManagedDevice(
+                deviceId = deviceId,
+                name = name,
+                productId = productId,
+                homeName = obj.getString("homeName"),
+                iconUrl = obj.optText("iconUrl"),
+                capabilities = capabilities,
+                activated = ActivatedDevice(
+                    deviceId = deviceId,
+                    localKey = obj.getString("localKey"),
+                    name = name,
+                    productId = productId,
+                    protocolVersion = obj.optText("protocolVersion"),
+                    category = obj.optText("category"),
+                    ip = obj.optText("ip")
+                )
+            )
+        }
+    }
+
+    fun saveCachedDevices(accountUid: String, devices: List<TuyaManagedDevice>) {
+        fun Any?.orNull(): Any = this ?: JSONObject.NULL
+        val array = JSONArray(devices.map { device ->
+            saveCapabilities(device.deviceId, device.capabilities)
+            JSONObject()
+                .put("deviceId", device.deviceId)
+                .put("name", device.name)
+                .put("productId", device.productId)
+                .put("homeName", device.homeName)
+                .put("iconUrl", device.iconUrl.orNull())
+                .put("localKey", device.activated.localKey)
+                .put("protocolVersion", device.activated.protocolVersion.orNull())
+                .put("category", device.activated.category.orNull())
+                .put("ip", device.activated.ip.orNull())
+                .put("dataPoints", JSONObject(device.capabilities.dataPoints))
+                .put("mac", device.capabilities.mac.orNull())
+                .put("tuyaLan", device.capabilities.tuyaLan)
+        })
+        val committed = preferences.edit().putString(KEY_CACHED_DEVICES_PREFIX + accountUid, array.toString()).commit()
+        check(committed) { "Unable to persist cached devices for $accountUid" }
+    }
+
     /** Drops everything stored about an unpaired device. */
     fun forgetDevice(deviceId: String) {
         val editor = preferences.edit()
             .remove(KEY_CAPABILITIES_PREFIX + deviceId)
             .remove(KEY_NETWORK_PREFIX + deviceId)
         preferences.all.keys.filter { it.startsWith("$ONVIF_PREFIX${deviceId}_") }.forEach { editor.remove(it) }
+        preferences.all.keys.filter { it.startsWith(KEY_CACHED_DEVICES_PREFIX) }.forEach { key ->
+            val raw = preferences.getString(key, null) ?: return@forEach
+            val array = JSONArray(raw)
+            val kept = JSONArray()
+            for (index in 0 until array.length()) {
+                val obj = array.getJSONObject(index)
+                if (obj.getString("deviceId") != deviceId) kept.put(obj)
+            }
+            editor.putString(key, kept.toString())
+        }
         check(editor.commit()) { "Unable to forget device $deviceId" }
     }
 
@@ -449,6 +521,7 @@ class SecureSettingsStore(context: Context) {
         const val ONVIF_ADDRESS_SUFFIX = "_address"
         const val KEY_CAPABILITIES_PREFIX = "capabilities_"
         const val KEY_NETWORK_PREFIX = "network_"
+        const val KEY_CACHED_DEVICES_PREFIX = "cached_devices_"
         const val KEY_DEVICE_ID = "device_id"
         const val KEY_LOCAL_KEY = "device_local_key"
         const val KEY_DEVICE_NAME = "device_name"
