@@ -42,24 +42,11 @@ class CameraOnvifRepository(private val context: Context) {
         val attemptedPasswords = mutableSetOf<String>()
         val verified: VerifiedOnvif
         try {
-            awaitCallback(camera, "ONVIF initial state read") { callback ->
-                camera.sdk.getDpList(listOf(dps.switch, dps.passwordChanged, dps.ipAddress), callback)
-            }
-            val initialValues = deviceBean(camera).dps
-            val wasSwitchOn = initialValues[dps.switch] == true
-            val wasPasswordChanged = initialValues[dps.passwordChanged] == true
-            // Some camera firmware rejects a password change while ONVIF is switched on, so turn it off first.
-            if (wasSwitchOn) {
-                onProgress("Turning ONVIF off before setting the password…")
-                publish(camera, "ONVIF switch off (DP ${dps.switch})", """{"${dps.switch}":false}""")
-                awaitDp(camera, "ONVIF switch off confirmation (DP ${dps.switch})", dps.switch, false)
-            }
             onProgress("Setting the ONVIF password…")
             val activePassword = ensurePassword(
                 camera = camera,
                 existingPassword = existingPassword,
                 targetPassword = targetPassword,
-                wasPasswordChanged = wasPasswordChanged,
                 attemptedPasswords = attemptedPasswords,
                 savePassword = savePassword
             )
@@ -67,25 +54,6 @@ class CameraOnvifRepository(private val context: Context) {
             onProgress("Turning ONVIF on…")
             publish(camera, "ONVIF switch (DP ${dps.switch})", """{"${dps.switch}":true}""")
             awaitDp(camera, "ONVIF switch on confirmation (DP ${dps.switch})", dps.switch, true)
-            // The camera only (re)starts its ONVIF and RTSP servers when the IP mode actually changes, so flip it to
-            // the other mode and back. Forcing dynamic then static does nothing on the first step when the camera is
-            // already dynamic, and it would leave a dynamic camera on static.
-            val mode = readDp(camera, "ONVIF IP mode read (DP ${dps.ipType})", dps.ipType)
-            if (mode != "0" && mode != "1") {
-                throw CameraOnvifException(
-                    "ONVIF IP mode read (DP ${dps.ipType})",
-                    "camera reported IP mode '$mode', expected 0 or 1"
-                )
-            }
-            val flipped = if (mode == "0") "1" else "0"
-            onProgress("Toggling the camera's IP mode to start ONVIF…")
-            publish(camera, "ONVIF IP mode toggle (DP ${dps.ipType})", """{"${dps.ipType}":"$flipped"}""")
-            awaitDp(camera, "ONVIF IP mode toggle confirmation (DP ${dps.ipType})", dps.ipType, flipped)
-            delay(1500)
-            onProgress("Restoring the camera's IP mode…")
-            publish(camera, "ONVIF IP mode restore (DP ${dps.ipType})", """{"${dps.ipType}":"$mode"}""")
-            awaitDp(camera, "ONVIF IP mode restore confirmation (DP ${dps.ipType})", dps.ipType, mode)
-            delay(1500)
             onProgress("Waiting for the camera's ONVIF and RTSP streams to come online…")
             verified = verifyState(camera, activePassword)
         } catch (e: CameraOnvifException) {
@@ -118,75 +86,31 @@ class CameraOnvifRepository(private val context: Context) {
     }
 
     /**
-     * Sets the camera's ONVIF password and returns the password that is now active on the camera.
-     * When [targetPassword] is null, tries the common default passwords in order (keeping `"admin"` when the camera
-     * allows it, or the first fallback default such as `"admin123"` when the firmware forbids `"admin"`).
+     * Sets the camera's ONVIF password in a single forward step (no back-and-forth rotation).
+     * Tries `"admin"` first, then `"Admin123"`, and finally a generated alphanumeric password for models that require
+     * a long random password.
      */
     private suspend fun ensurePassword(
         camera: Camera,
         existingPassword: String?,
         targetPassword: String?,
-        wasPasswordChanged: Boolean,
         attemptedPasswords: MutableSet<String>,
         savePassword: suspend (String) -> Unit
     ): String {
         val oldCandidates = (listOfNotNull(existingPassword) + Credentials.DEFAULT_PASSWORDS).distinct()
-        val fallbacks = listOf("admin123", "123456", "12345678", "admin1234")
-        if (targetPassword != null) {
-            for (old in oldCandidates) {
-                if (old == targetPassword) {
-                    val hop = if (targetPassword == "admin123") generatePassword() else "admin123"
-                    if (tryChangePassword(camera, old, hop, attemptedPasswords, savePassword)) {
-                        if (tryChangePassword(camera, hop, targetPassword, attemptedPasswords, savePassword)) {
-                            return targetPassword
-                        }
-                        throw CameraOnvifException(
-                            "ONVIF password",
-                            "the camera rejected the requested password (kept temporary password)"
-                        )
-                    }
-                } else if (tryChangePassword(camera, old, targetPassword, attemptedPasswords, savePassword)) {
-                    return targetPassword
-                }
-            }
-            throw CameraOnvifException("ONVIF password", "the camera rejected the password change")
+        val newCandidates = if (targetPassword != null) {
+            listOf(targetPassword)
+        } else {
+            listOf(DEFAULT_PASSWORD, "Admin123", generatePassword())
         }
-
         for (old in oldCandidates) {
-            if (old == DEFAULT_PASSWORD) {
-                for (hop in fallbacks + listOf(generatePassword())) {
-                    if (tryChangePassword(camera, old, hop, attemptedPasswords, savePassword)) {
-                        // The camera accepted `hop` (so onvif_pw_changed is now true). Try rotating back to `admin`;
-                        // if this model forbids `admin` as a new password, keep `hop`.
-                        return if (tryChangePassword(camera, hop, DEFAULT_PASSWORD, attemptedPasswords, savePassword)) {
-                            DEFAULT_PASSWORD
-                        } else {
-                            hop
-                        }
-                    }
-                }
-            } else {
-                if (tryChangePassword(camera, old, DEFAULT_PASSWORD, attemptedPasswords, savePassword)) {
-                    return DEFAULT_PASSWORD
-                }
-                for (candidate in fallbacks + listOf(generatePassword())) {
-                    if (candidate == old) {
-                        if (!wasPasswordChanged) continue
-                        val verifyHop = if (old == "admin123") "12345678" else "admin123"
-                        if (tryChangePassword(camera, old, verifyHop, attemptedPasswords, savePassword)) {
-                            return if (tryChangePassword(camera, verifyHop, old, attemptedPasswords, savePassword)) {
-                                old
-                            } else {
-                                verifyHop
-                            }
-                        }
-                    } else if (tryChangePassword(camera, old, candidate, attemptedPasswords, savePassword)) {
-                        return candidate
-                    }
+            for (candidate in newCandidates) {
+                if (tryChangePassword(camera, old, candidate, attemptedPasswords, savePassword)) {
+                    return candidate
                 }
             }
         }
-        throw CameraOnvifException("ONVIF password", "the camera rejected all default password combinations")
+        throw CameraOnvifException("ONVIF password", "the camera rejected the password change")
     }
 
     private suspend fun tryChangePassword(
@@ -254,24 +178,23 @@ class CameraOnvifRepository(private val context: Context) {
             override fun onNetworkStatusChanged(devId: String, status: Boolean) = Unit
             override fun onDevInfoUpdate(devId: String) = Unit
         }
+        val payload = JSON.toJSONString(
+            mapOf(dp to JSON.toJSONString(mapOf("oldpwd" to oldPassword, "newpwd" to password)))
+        )
         camera.sdk.registerDevListener(listener)
         try {
             // Persist before sending: a publish that errors or times out may still have been applied by the camera.
             savePassword(password)
-            publish(
-                camera,
-                "ONVIF password (DP $dp)",
-                JSON.toJSONString(
-                    mapOf(
-                        dp to JSON.toJSONString(mapOf("oldpwd" to oldPassword, "newpwd" to password))
-                    )
-                )
-            )
-            // The camera only reports the password-change result when queried with getDpList; if the first read
-            // arrives while it is still applying the change, it answers blank until the next read.
+            // Right after pairing the camera's ONVIF daemon may still be initializing and drop the first publish
+            // (reporting a blank DP update), so re-publish every few polls until the camera answers with `res`.
             try {
                 withTimeout(SDK_TIMEOUT_MS) {
+                    var attempt = 0
                     while (!result.isCompleted) {
+                        if (attempt % 3 == 0) {
+                            publish(camera, "ONVIF password (DP $dp)", payload)
+                        }
+                        attempt++
                         awaitCallback(camera, "ONVIF password read (DP $dp)") { callback ->
                             camera.sdk.getDpList(listOf(dp), callback)
                         }
@@ -393,14 +316,37 @@ class CameraOnvifRepository(private val context: Context) {
 
     private class VerifiedOnvif(val address: String, val info: OnvifInfo, val credentials: Credentials)
 
+    // Some firmware only starts its ONVIF and RTSP daemons when the IP mode changes, so flip it once if ONVIF does
+    // not answer on its own after switching ONVIF on.
+    private suspend fun toggleIpMode(camera: Camera) {
+        val dps = camera.dps
+        val mode = readDp(camera, "ONVIF IP mode read (DP ${dps.ipType})", dps.ipType)
+        if (mode != "0" && mode != "1") {
+            throw CameraOnvifException(
+                "ONVIF IP mode read (DP ${dps.ipType})",
+                "camera reported IP mode '$mode', expected 0 or 1"
+            )
+        }
+        val flipped = if (mode == "0") "1" else "0"
+        camera.onProgress("Toggling the camera's IP mode to start ONVIF…")
+        publish(camera, "ONVIF IP mode toggle (DP ${dps.ipType})", """{"${dps.ipType}":"$flipped"}""")
+        awaitDp(camera, "ONVIF IP mode toggle confirmation (DP ${dps.ipType})", dps.ipType, flipped)
+        delay(1500)
+        camera.onProgress("Restoring the camera's IP mode…")
+        publish(camera, "ONVIF IP mode restore (DP ${dps.ipType})", """{"${dps.ipType}":"$mode"}""")
+        awaitDp(camera, "ONVIF IP mode restore confirmation (DP ${dps.ipType})", dps.ipType, mode)
+        delay(1500)
+        camera.onProgress("Waiting for the camera's ONVIF and RTSP streams to come online…")
+    }
+
     // getDpList refreshes the SDK's cached DPs but fires no update for unchanged values, so read the cache.
-    // After the IP-mode cycle the camera takes several seconds to bring its ONVIF and RTSP daemons up, so keep
-    // polling until ONVIF discovery and the stream probe both succeed.
     private suspend fun verifyState(camera: Camera, password: String): VerifiedOnvif {
         val stage = "ONVIF state verification"
         val dps = camera.dps
         val credentials = Credentials.candidates(Credentials(DEFAULT_USERNAME, password))
         var last = "nothing read yet"
+        var polls = 0
+        var toggledIpMode = false
         Log.d(TAG, "verify start")
         val verified = withTimeoutOrNull(STATE_TIMEOUT_MS) {
             var found: VerifiedOnvif? = null
@@ -448,7 +394,14 @@ class CameraOnvifRepository(private val context: Context) {
                     Log.d(TAG, "verify read: $last")
                 }
                 if (found == null) {
-                    if (switch == false) publish(camera, "ONVIF switch (DP ${dps.switch})", """{"${dps.switch}":true}""")
+                    polls++
+                    if (switch == false) {
+                        publish(camera, "ONVIF switch (DP ${dps.switch})", """{"${dps.switch}":true}""")
+                    } else if (!toggledIpMode && polls >= 2) {
+                        toggledIpMode = true
+                        toggleIpMode(camera)
+                        continue
+                    }
                     delay(2000)
                 }
             }
