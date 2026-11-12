@@ -65,7 +65,8 @@ fun SettingsScreen(
         AccountsCard(devicesViewModel)
         BackupCard(devicesViewModel)
         HaCard(title = "Camera feeds") {
-            CardText("Where new camera feeds go in Home Assistant. Each camera can override it from its device sheet.")
+            CardText("Where new camera feeds go in Home Assistant. Each camera can override it on its device screen. " +
+                "Only options that device actually has are offered: ONVIF needs a detected ONVIF service, and Tuya Local needs a Tuya Local entry.")
             Column(Modifier.padding(horizontal = 12.dp)) {
                 StreamDestination.entries.forEach { destination ->
                     ChoiceRow(destinationLabel(destination), state.settings.feedDestination == destination.storedName) {

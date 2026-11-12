@@ -47,7 +47,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.emi.tuyeasie.data.SavedTuyaAccount
 import com.emi.tuyeasie.data.TuyaManagedDevice
-import com.emi.tuyeasie.ui.DeviceSheet
+import com.emi.tuyeasie.ui.DeviceScreen
 import com.emi.tuyeasie.ui.DevicesScreen
 import com.emi.tuyeasie.ui.MyDevicesViewModel
 import com.emi.tuyeasie.ui.OnboardingViewModel
@@ -86,7 +86,7 @@ class MainActivity : ComponentActivity() {
                 val snackbar = remember { SnackbarHostState() }
                 val uriHandler = LocalUriHandler.current
                 val bar = LocalHaBar.current
-                var sheetSource by remember { mutableStateOf<Pair<SavedTuyaAccount, TuyaManagedDevice>?>(null) }
+                var deviceSource by remember { mutableStateOf<Pair<SavedTuyaAccount, TuyaManagedDevice>?>(null) }
                 LaunchedEffect(state.permissionRequestVersion) {
                     if (state.permissionRequestVersion > 0) {
                         scanPermissions.launch(requiredScanPermissions())
@@ -167,7 +167,7 @@ class MainActivity : ComponentActivity() {
                             viewModel = myDevicesViewModel,
                             configureEnabled = !state.busy,
                             onConfigureDevice = { account, device ->
-                                sheetSource = account to device
+                                deviceSource = account to device
                                 viewModel.openDeviceSetup(device.activated)
                             },
                             padding = padding
@@ -175,18 +175,19 @@ class MainActivity : ComponentActivity() {
                         Tab.SETTINGS -> SettingsScreen(state, viewModel, myDevicesViewModel, padding)
                     }
                 }
-                if (state.sheetOpen) {
-                    val source = sheetSource?.takeIf { it.second.deviceId == state.activatedDevice?.deviceId }
-                    DeviceSheet(
+                if (state.deviceScreenOpen) {
+                    val source = deviceSource?.takeIf { it.second.deviceId == state.activatedDevice?.deviceId }
+                    DeviceScreen(
                         state,
                         viewModel,
+                        iconUrl = source?.second?.iconUrl,
                         onOpenSettings = {
-                            viewModel.closeSheet()
+                            viewModel.closeDeviceScreen()
                             tab = Tab.SETTINGS
                         },
                         onUnpair = source?.let { (account, device) ->
                             {
-                                viewModel.closeSheet()
+                                viewModel.closeDeviceScreen()
                                 tab = Tab.DEVICES
                                 myDevicesViewModel.requestUnpair(account, device)
                             }
