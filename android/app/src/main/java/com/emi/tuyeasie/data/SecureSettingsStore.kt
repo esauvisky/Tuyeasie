@@ -49,12 +49,15 @@ data class OnvifRecord(
     val mainResolution: String? = null,
     val subCodec: String? = null,
     val subResolution: String? = null,
+    // Home Assistant config entries created for this feed, removed again when the device is unpaired.
+    val entryIds: List<String> = emptyList(),
     val verified: Boolean
 ) {
     override fun toString() =
         "OnvifRecord(deviceId=$deviceId, address=$address, username=$username, password=[redacted], " +
             "mainUrl=[redacted], subUrl=[redacted], destination=$destination, registered=$registered, " +
-            "mainCodec=$mainCodec, mainResolution=$mainResolution, subCodec=$subCodec, subResolution=$subResolution, verified=$verified)"
+            "mainCodec=$mainCodec, mainResolution=$mainResolution, subCodec=$subCodec, subResolution=$subResolution, " +
+            "entryIds=$entryIds, verified=$verified)"
 }
 
 enum class ImportState {
@@ -187,6 +190,7 @@ class SecureSettingsStore(context: Context) {
             mainResolution = preferences.getString(onvifKey(deviceId, "main_resolution"), null),
             subCodec = preferences.getString(onvifKey(deviceId, "sub_codec"), null),
             subResolution = preferences.getString(onvifKey(deviceId, "sub_resolution"), null),
+            entryIds = preferences.getString(onvifKey(deviceId, "entry_ids"), "")!!.split(',').filter { it.isNotEmpty() },
             // Records stored before this flag existed were only ever saved after full verification.
             verified = preferences.getBoolean(onvifKey(deviceId, "verified"), true)
         )
@@ -241,6 +245,7 @@ class SecureSettingsStore(context: Context) {
             .putString(onvifKey(record.deviceId, "main_resolution"), record.mainResolution)
             .putString(onvifKey(record.deviceId, "sub_codec"), record.subCodec)
             .putString(onvifKey(record.deviceId, "sub_resolution"), record.subResolution)
+            .putString(onvifKey(record.deviceId, "entry_ids"), record.entryIds.joinToString(","))
             .putBoolean(onvifKey(record.deviceId, "verified"), record.verified)
             .commit()
         check(committed) { "Unable to persist ONVIF record" }
@@ -341,6 +346,15 @@ class SecureSettingsStore(context: Context) {
             .put("portScanStreams", streams(report.portScanStreams))
         val committed = preferences.edit().putString(KEY_NETWORK_PREFIX + deviceId, json.toString()).commit()
         check(committed) { "Unable to persist network report" }
+    }
+
+    /** Drops everything stored about an unpaired device. */
+    fun forgetDevice(deviceId: String) {
+        val editor = preferences.edit()
+            .remove(KEY_CAPABILITIES_PREFIX + deviceId)
+            .remove(KEY_NETWORK_PREFIX + deviceId)
+        preferences.all.keys.filter { it.startsWith("$ONVIF_PREFIX${deviceId}_") }.forEach { editor.remove(it) }
+        check(editor.commit()) { "Unable to forget device $deviceId" }
     }
 
     private fun onvifKey(deviceId: String, field: String) = "${ONVIF_PREFIX}${deviceId}_$field"

@@ -290,6 +290,23 @@ class HomeAssistantClient(
         }
     }
 
+    /**
+     * Deletes the device's Tuya Local entry, [entryIds], and the generic cameras titled [legacyCameraTitles].
+     * Entries already removed in Home Assistant are skipped. Returns how many entries were deleted.
+     */
+    fun removeDevice(deviceId: String, entryIds: List<String>, legacyCameraTitles: List<String>): Int {
+        val targets = openVerifiedSession().use { session ->
+            val existing = session.callCommand("config_entries/get").getJSONArray("result")
+                ?.let { entries -> (0 until entries.size).map { checkNotNull(entries.getJSONObject(it).getString("entry_id")) }.toSet() }
+                ?: throw invalidResponse("Home Assistant returned no config-entry list.")
+            (listOfNotNull(findTuyaLocalEntryId(session, deviceId)) + entryIds + legacyCameraTitles.mapNotNull(::findCameraEntryId))
+                .distinct()
+                .filter { it in existing }
+        }
+        targets.forEach { httpRequest("DELETE", "/api/config/config_entries/entry/$it", null) }
+        return targets.size
+    }
+
     fun createCamera(name: String, streamUrl: String, username: String, password: String): String {
         if (name.isBlank() || streamUrl.isBlank()) {
             throw HomeAssistantException(

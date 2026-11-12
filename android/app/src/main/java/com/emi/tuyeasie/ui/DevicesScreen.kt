@@ -219,8 +219,8 @@ private fun ConfirmationDialog(confirmation: MyDevicesConfirmation, onConfirm: (
     val (title, body, action) = when (confirmation) {
         is MyDevicesConfirmation.Unpair -> Triple(
             "Unpair device?",
-            "\"${confirmation.device.name}\" (${confirmation.device.deviceId}) will be removed from " +
-                "${confirmation.saved.account.uid} and factory-reset state may be required to pair it again.",
+            "\"${confirmation.device.name}\" (${confirmation.device.deviceId}) will be removed from Home Assistant " +
+                "and from ${confirmation.saved.account.uid}. A factory reset may be required to pair it again.",
             "Unpair"
         )
         is MyDevicesConfirmation.Forget -> Triple(

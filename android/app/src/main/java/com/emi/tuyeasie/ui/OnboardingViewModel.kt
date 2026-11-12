@@ -1034,8 +1034,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                             store.savePendingOnvifPassword(device.deviceId, password)
                         }
                     }
-                    withContext(Dispatchers.IO) { store.saveOnvifRecord(record) }
-                    onvifConfigured = record
+                    onvifConfigured = withContext(Dispatchers.IO) { keepEntryIds(record).also(store::saveOnvifRecord) }
                 } catch (exception: CameraOnvifException) {
                     // ONVIF failing doesn't stop the import; the device is added anyway and the error is shown.
                     onvifFailure = exception
@@ -1186,6 +1185,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                         mainUrl = main.url,
                         subUrl = sub?.url,
                         destination = existing?.destination,
+                        entryIds = existing?.entryIds.orEmpty(),
                         registered = unchanged && existing.registered,
                         mainCodec = main.codec,
                         mainResolution = main.resolution,
@@ -1273,6 +1273,10 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    // A fresh setup result knows nothing about Home Assistant; the entries made for the earlier record still exist.
+    private fun keepEntryIds(record: OnvifRecord): OnvifRecord =
+        record.copy(entryIds = store.loadOnvifRecord(record.deviceId)?.entryIds.orEmpty())
+
     // The pending password is the most recent one sent to the camera; saving a record clears it.
     private fun knownOnvifPassword(deviceId: String): String? =
         store.loadPendingOnvifPassword(deviceId) ?: store.loadOnvifRecord(deviceId)?.password
@@ -1348,7 +1352,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 }
             ) { password ->
                 withContext(Dispatchers.IO) { store.savePendingOnvifPassword(device.deviceId, password) }
-            }.also { configured -> withContext(Dispatchers.IO) { store.saveOnvifRecord(configured) } }
+            }.let { configured -> withContext(Dispatchers.IO) { keepEntryIds(configured).also(store::saveOnvifRecord) } }
         } catch (exception: CameraOnvifException) {
             if (generation != importGeneration.get()) return
             val sentPassword = withContext(Dispatchers.IO) { knownOnvifPassword(device.deviceId) }
@@ -1548,7 +1552,11 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                     )
                 }
                 if (generation != importGeneration.get()) return
-                val registered = record.copy(destination = destination.storedName, registered = true)
+                val registered = record.copy(
+                    destination = destination.storedName,
+                    registered = true,
+                    entryIds = (record.entryIds + entryId).distinct()
+                )
                 withContext(Dispatchers.IO) { store.saveOnvifRecord(registered) }
                 if (generation != importGeneration.get()) return
                 update {
@@ -1579,7 +1587,11 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                     )
                 }
                 if (generation != importGeneration.get()) return
-                val registered = record.copy(destination = destination.storedName, registered = true)
+                val registered = record.copy(
+                    destination = destination.storedName,
+                    registered = true,
+                    entryIds = (record.entryIds + entryId).distinct()
+                )
                 withContext(Dispatchers.IO) { store.saveOnvifRecord(registered) }
                 if (generation != importGeneration.get()) return
                 update {
@@ -1627,7 +1639,11 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
             update { copy(subEntryId = entryId, subError = error) }
         }
         if (current.mainEntryId != null && (subUrl == null || current.subEntryId != null)) {
-            val registered = record.copy(destination = destination.storedName, registered = true)
+            val registered = record.copy(
+                destination = destination.storedName,
+                registered = true,
+                entryIds = (record.entryIds + listOfNotNull(current.mainEntryId, current.subEntryId)).distinct()
+            )
             withContext(Dispatchers.IO) { store.saveOnvifRecord(registered) }
             if (generation != importGeneration.get()) return
             update { copy(streamStatus = StreamStatus.COMPLETE, onvifRecord = registered) }

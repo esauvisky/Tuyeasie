@@ -11,6 +11,8 @@ import com.emi.tuyeasie.data.TuyaAccountKind
 import com.emi.tuyeasie.data.TuyaAccountRepository
 import com.emi.tuyeasie.data.TuyaManagedDevice
 import com.emi.tuyeasie.data.TuyaSdkException
+import com.emi.tuyeasie.hass.HomeAssistantClient
+import com.emi.tuyeasie.hass.HomeAssistantException
 import java.io.IOException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -58,6 +60,7 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
     private val store = SecureSettingsStore(application)
     private val repository = TuyaAccountRepository(application, store)
     private val backupExporter = BackupExporter(store)
+    private val homeAssistantClient = HomeAssistantClient(store)
     // The Tuya SDK holds a single signed-in user, so sign-in + operation pairs must not interleave.
     private val sdkLock = Mutex()
     private val _uiState = MutableStateFlow(MyDevicesUiState())
@@ -153,8 +156,27 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun unpair(confirmation: MyDevicesConfirmation.Unpair) {
-        _uiState.update { it.copy(unpairingDeviceId = confirmation.device.deviceId, actionError = null) }
+        val device = confirmation.device
+        _uiState.update { it.copy(unpairingDeviceId = device.deviceId, actionError = null) }
         viewModelScope.launch {
+            // Home Assistant goes first: its cleanup can be retried, while a device removed from Tuya can't be unpaired again.
+            if (store.loadSettings().hassUrl.isNotBlank()) {
+                try {
+                    withContext(Dispatchers.IO) {
+                        val record = store.loadOnvifRecord(device.deviceId)
+                        // Feeds registered before entry IDs were stored can only be found by the titles they were given.
+                        val legacyTitles = if (record != null && record.registered && record.entryIds.isEmpty()) {
+                            listOf("${device.name} Main", "${device.name} Substream")
+                        } else emptyList()
+                        homeAssistantClient.removeDevice(device.deviceId, record?.entryIds.orEmpty(), legacyTitles)
+                    }
+                } catch (e: HomeAssistantException) {
+                    _uiState.update {
+                        it.copy(unpairingDeviceId = null, actionError = "Home Assistant cleanup failed, so the device was not unpaired: ${e.publicMessage}")
+                    }
+                    return@launch
+                }
+            }
             try {
                 sdkLock.withLock {
                     repository.removeDevice(confirmation.saved.account, confirmation.device.deviceId)
@@ -163,6 +185,7 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
                 _uiState.update { it.copy(unpairingDeviceId = null, actionError = e.message) }
                 return@launch
             }
+            withContext(Dispatchers.IO) { store.forgetDevice(device.deviceId) }
             _uiState.update { it.copy(unpairingDeviceId = null) }
             refresh()
         }
