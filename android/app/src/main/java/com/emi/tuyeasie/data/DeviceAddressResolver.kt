@@ -16,7 +16,7 @@ class DeviceAddressResolver(private val context: Context) {
         username: String,
         password: String
     ): DeviceAddress {
-        // A verified record's address came from the camera's own ONVIF address data point and answered RTSP.
+        // A verified record's address came from the camera's own ONVIF address data point and answered ONVIF discovery.
         if (capabilities.tuyaOnvif && onvifRecord != null && onvifRecord.verified) {
             return DeviceAddress(onvifRecord.address, AddressSource.ONVIF_DATA_POINT, null)
         }

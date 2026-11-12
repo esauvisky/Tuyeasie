@@ -8,8 +8,6 @@ import com.thingclips.smart.sdk.api.IDevListener
 import com.thingclips.smart.sdk.api.IResultCallback
 import com.thingclips.smart.sdk.api.IThingDevice
 import com.emi.tuyeasie.hass.HomeAssistantProtocol
-import java.net.InetSocketAddress
-import java.net.Socket
 import java.security.SecureRandom
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -44,7 +42,7 @@ class CameraOnvifRepository(private val context: Context) {
             onProgress
         )
         val dps = camera.dps
-        val address: String
+        val onvif: OnvifEndpoint
         try {
             // The camera rejects a password change once ONVIF is already on, so set the password first.
             onProgress("Setting the ONVIF password…")
@@ -74,7 +72,7 @@ class CameraOnvifRepository(private val context: Context) {
             awaitDp(camera, "ONVIF IP mode restore confirmation (DP ${dps.ipType})", dps.ipType, mode)
             delay(1500)
             onProgress("Waiting for the camera to report its ONVIF address…")
-            address = verifyState(camera)
+            onvif = verifyState(camera)
         } catch (e: CameraOnvifException) {
             val message = checkNotNull(e.message)
             val sanitized = message.replace(password, "[redacted]").replace(targetPassword, "[redacted]")
@@ -84,8 +82,9 @@ class CameraOnvifRepository(private val context: Context) {
         } finally {
             camera.sdk.onDestroy()
         }
+        val address = onvif.address
         onProgress("Reading the camera's streams over ONVIF at $address…")
-        val info = withContext(Dispatchers.IO) { readStreams(address, targetPassword) }
+        val info = withContext(Dispatchers.IO) { readStreams(onvif.serviceUrl, targetPassword) }
         val main = info.streams[0]
         val sub = info.streams.getOrNull(1)
         return OnvifRecord(
@@ -103,11 +102,9 @@ class CameraOnvifRepository(private val context: Context) {
         )
     }
 
-    // Blocking. The ONVIF port differs between firmwares, so the camera's own discovery answer gives the service address.
-    private fun readStreams(address: String, password: String): OnvifInfo {
+    // Blocking.
+    private fun readStreams(serviceUrl: String, password: String): OnvifInfo {
         val stage = "ONVIF streams"
-        val serviceUrl = OnvifDiscovery.discover(context).firstOrNull { it.ip == address }?.serviceUrls?.first()
-            ?: throw CameraOnvifException(stage, "the camera at $address did not answer ONVIF discovery")
         val info = try {
             OnvifClient().probe(serviceUrl, DEFAULT_USERNAME, password)
         } catch (e: OnvifException) {
@@ -297,15 +294,19 @@ class CameraOnvifRepository(private val context: Context) {
         } ?: throw CameraOnvifException(stage, "timed out waiting for $dp=$expected; last seen $dp=$last")
     }
 
+    private class OnvifEndpoint(val address: String, val serviceUrl: String)
+
     // getDpList refreshes the SDK's cached DPs but fires no update for unchanged values, so read the cache.
-    // The IP-mode cycle can move the camera to a new DHCP address, so onvif_ip_addr counts only once RTSP answers there.
-    private suspend fun verifyState(camera: Camera): String {
+    // The IP-mode cycle can move the camera to a new DHCP address, so onvif_ip_addr counts only once that address
+    // answers ONVIF discovery. Its ONVIF and RTSP ports differ between models (5000/8554, 10000/554), so the
+    // discovery answer is also what says where the ONVIF service is.
+    private suspend fun verifyState(camera: Camera): OnvifEndpoint {
         val stage = "ONVIF state verification"
         val dps = camera.dps
         var last = "nothing read yet"
         Log.d(TAG, "verify start")
-        val address = withTimeoutOrNull(STATE_TIMEOUT_MS) {
-            var found: String? = null
+        val endpoint = withTimeoutOrNull(STATE_TIMEOUT_MS) {
+            var found: OnvifEndpoint? = null
             while (found == null) {
                 awaitCallback(camera, stage) { callback ->
                     camera.sdk.getDpList(listOf(dps.switch, dps.passwordChanged, dps.ipAddress), callback)
@@ -314,12 +315,16 @@ class CameraOnvifRepository(private val context: Context) {
                 val switch = values[dps.switch]
                 val passwordChanged = values[dps.passwordChanged]
                 val ip = values[dps.ipAddress] as? String
-                val reachable = ip != null && HomeAssistantProtocol.isRfc1918Address(ip) && rtspReachable(ip)
+                val serviceUrl = if (ip != null && HomeAssistantProtocol.isRfc1918Address(ip)) {
+                    withContext(Dispatchers.IO) {
+                        OnvifDiscovery.discover(context).firstOrNull { it.ip == ip }?.serviceUrls?.first()
+                    }
+                } else null
                 last = "${dps.switch}=$switch, ${dps.passwordChanged}=$passwordChanged, ${dps.ipAddress}=$ip, " +
-                    "RTSP reachable=$reachable"
+                    "ONVIF service=$serviceUrl"
                 Log.d(TAG, "verify read: $last")
-                if (switch == true && passwordChanged == true && reachable) {
-                    found = ip
+                if (switch == true && passwordChanged == true && serviceUrl != null) {
+                    found = OnvifEndpoint(checkNotNull(ip), serviceUrl)
                 } else {
                     if (switch == false) publish(camera, "ONVIF switch (DP ${dps.switch})", """{"${dps.switch}":true}""")
                     delay(2000)
@@ -327,20 +332,11 @@ class CameraOnvifRepository(private val context: Context) {
             }
             found
         }
-        return address ?: throw CameraOnvifException(
+        return endpoint ?: throw CameraOnvifException(
             stage,
-            "timed out waiting for ${dps.switch}=true, ${dps.passwordChanged}=true and RTSP on the private IPv4 in " +
-                "${dps.ipAddress}; last seen: $last"
+            "timed out waiting for ${dps.switch}=true, ${dps.passwordChanged}=true and an ONVIF discovery answer from " +
+                "the private IPv4 in ${dps.ipAddress}; last seen: $last"
         )
-    }
-
-    private suspend fun rtspReachable(address: String): Boolean = withContext(Dispatchers.IO) {
-        try {
-            Socket().use { it.connect(InetSocketAddress(address, RTSP_PORT), 2000) }
-            true
-        } catch (e: java.io.IOException) {
-            false
-        }
     }
 
     private fun generatePassword(): String {
@@ -360,6 +356,5 @@ class CameraOnvifRepository(private val context: Context) {
         private const val ONLINE_TIMEOUT_MS = 60_000L
         // Confirmation waits include a possible reconnect while the camera is offline.
         const val STATE_TIMEOUT_MS = ONLINE_TIMEOUT_MS + SDK_TIMEOUT_MS
-        private const val RTSP_PORT = 8554
     }
 }
