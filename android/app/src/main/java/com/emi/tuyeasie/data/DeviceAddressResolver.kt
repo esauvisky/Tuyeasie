@@ -7,7 +7,7 @@ class DeviceAddressException(message: String) : RuntimeException(message)
 
 data class DeviceAddress(val ip: String, val source: AddressSource, val protocolVersion: String?)
 
-/** Finds a device's LAN address through the one channel its capabilities say it answers on. Blocking. */
+/** Finds a device's LAN address through Tuya LAN broadcast or ONVIF MAC discovery. Blocking. */
 class DeviceAddressResolver(private val context: Context) {
     fun resolve(
         deviceId: String,
@@ -19,23 +19,43 @@ class DeviceAddressResolver(private val context: Context) {
         if (capabilities.tuyaOnvif && onvifRecord != null && onvifRecord.verified) {
             return DeviceAddress(onvifRecord.address, AddressSource.ONVIF_DATA_POINT, null)
         }
-        if (capabilities.tuyaLan) {
-            val found = TuyaLanScanner.findDevice(deviceId)
-                ?: throw DeviceAddressException("The device did not answer Tuya's LAN discovery broadcast.")
-            return DeviceAddress(found.ip, AddressSource.TUYA_LAN, found.protocolVersion)
+        // Devices with Tuya data points speak the Tuya LAN protocol; devices with 0 data points are ONVIF-only even
+        // when the Tuya SDK leaves hasLanCommunication set on the bean.
+        if (capabilities.supportsTuyaLocal) {
+            TuyaLanScanner.findDevice(deviceId)?.let { found ->
+                return DeviceAddress(found.ip, AddressSource.TUYA_LAN, found.protocolVersion)
+            }
+            capabilities.mac?.let { mac ->
+                discoverByOnvifMac(mac, credentials)?.let { return it }
+            }
+            throw DeviceAddressException("The device did not answer Tuya's LAN discovery broadcast.")
         }
         val mac = capabilities.mac
-            ?: throw DeviceAddressException(
+        if (mac != null) {
+            discoverByOnvifMac(mac, credentials)?.let { return it }
+        }
+        if (capabilities.tuyaLan) {
+            TuyaLanScanner.findDevice(deviceId)?.let { found ->
+                return DeviceAddress(found.ip, AddressSource.TUYA_LAN, found.protocolVersion)
+            }
+        }
+        if (mac == null) {
+            throw DeviceAddressException(
                 "The device has no local Tuya protocol and Tuya reports no MAC address, so it can't be found on the network."
             )
+        }
+        throw DeviceAddressException(
+            "No ONVIF device on the network matched MAC $mac, and the device did not answer Tuya's LAN discovery."
+        )
+    }
+
+    private fun discoverByOnvifMac(mac: String, credentials: List<Credentials>): DeviceAddress? {
         val target = normalizeMac(mac)
-        val candidates = OnvifDiscovery.discover(context)
-        for (candidate in candidates) {
+        for (candidate in OnvifDiscovery.discover(context)) {
             for (url in candidate.serviceUrls) {
                 val candidateMac = try {
                     OnvifClient().macAddress(url, credentials)
                 } catch (e: OnvifException) {
-                    // Other ONVIF devices on the network may refuse this device's credentials.
                     continue
                 } catch (e: IOException) {
                     continue
@@ -45,10 +65,7 @@ class DeviceAddressResolver(private val context: Context) {
                 }
             }
         }
-        throw DeviceAddressException(
-            "None of the ${candidates.size} ONVIF devices that answered discovery has MAC $mac, " +
-                "and the device has no local Tuya protocol to find it by."
-        )
+        return null
     }
 
     private fun normalizeMac(mac: String) = mac.lowercase().filter { it.isLetterOrDigit() }

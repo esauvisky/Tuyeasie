@@ -12,6 +12,10 @@ data class DeviceCapabilities(
     val tuyaOnvif: Boolean
         get() = TUYA_ONVIF_CODES.all { it in dataPoints }
 
+    // Tuya Local matches and controls devices by their data points; a device with none is camera/ONVIF-only.
+    val supportsTuyaLocal: Boolean
+        get() = tuyaLan && dataPoints.isNotEmpty()
+
     companion object {
         val TUYA_ONVIF_CODES = listOf(
             "onvif_switch", "onvif_ip_addr", "onvif_pw_changed", "onvif_change_pwd", "onvif_iptype_config"

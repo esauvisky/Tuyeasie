@@ -108,6 +108,7 @@ data class AddedDevice(
 )
 
 private const val NO_TUYA_LAN_MESSAGE = "This device has no local Tuya protocol, so Tuya Local can't control it."
+private const val NO_TUYA_DPS_MESSAGE = "This device exposes no Tuya data points, so Tuya Local can't control it."
 private const val UNVERIFIED_ONVIF_MESSAGE =
     "ONVIF was never verified for this camera. Its feed uses the camera's last known address and password."
 private const val NETWORK_SCAN_SETTLE_MILLIS = 4_000L
@@ -899,8 +900,10 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         }
         viewModelScope.launch {
             if (current.scanStatus == ScanStatus.IDLE && current.networkReport == null && (!capabilities.tuyaOnvif || current.onvifRecord != null)) rescanNetwork()
-            if (!capabilities.tuyaLan) {
-                update { copy(tuyaLocalUnavailable = NO_TUYA_LAN_MESSAGE) }
+            if (!capabilities.supportsTuyaLocal) {
+                update {
+                    copy(tuyaLocalUnavailable = if (!capabilities.tuyaLan) NO_TUYA_LAN_MESSAGE else NO_TUYA_DPS_MESSAGE)
+                }
                 return@launch
             }
             val entryId = try {
@@ -1053,7 +1056,6 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 null
             }
             if (generation != importGeneration.get()) return@launch
-            if (address != null) launchNetworkScan(device.deviceId, capabilities, address)
             val deviceForImport = device.copy(
                 ip = address?.ip ?: device.ip,
                 protocolVersion = device.protocolVersion?.trim()?.takeIf(HomeAssistantProtocol::isSupportedProtocolVersion)
@@ -1085,12 +1087,14 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                     subEntryId = null
                 )
             }
-            if (!capabilities.tuyaLan) {
+            if (!capabilities.supportsTuyaLocal) {
                 withContext(Dispatchers.IO) { store.savePendingDevice(deviceForImport) }
                 if (generation != importGeneration.get()) return@launch
-                update { onvifState().copy(pendingDevice = null, tuyaLocalUnavailable = NO_TUYA_LAN_MESSAGE) }
+                val unavailable = if (!capabilities.tuyaLan) NO_TUYA_LAN_MESSAGE else NO_TUYA_DPS_MESSAGE
+                update { onvifState().copy(pendingDevice = null, tuyaLocalUnavailable = unavailable) }
                 resetPairing(added = null)
                 update { copy(deviceScreenOpen = true) }
+                if (address != null) launchNetworkScan(device.deviceId, capabilities, address)
                 return@launch
             }
             update { copy(activationProgress = "Importing device into Home Assistant…") }
@@ -1119,6 +1123,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 }
                 resetPairing(AddedDevice(deviceForImport.name, current.homeAssistantEntryUrl(result.entryId)))
                 update { copy(deviceScreenOpen = true) }
+                if (address != null) launchNetworkScan(device.deviceId, capabilities, address)
             } catch (exception: HomeAssistantException) {
                 if (generation != importGeneration.get()) return@launch
                 if (exception.error == HomeAssistantError.UNSUPPORTED_PROFILE) {
@@ -1130,6 +1135,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                     }
                     resetPairing(added = null)
                     update { copy(deviceScreenOpen = true) }
+                    if (address != null) launchNetworkScan(device.deviceId, capabilities, address)
                     return@launch
                 }
                 val message = homeAssistantMessage(exception, current.settings)
@@ -1140,6 +1146,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 if (generation != importGeneration.get()) return@launch
                 resetPairing(added = null)
                 update { onvifState().copy(deviceScreenOpen = true, pendingDevice = failed) }
+                if (address != null) launchNetworkScan(device.deviceId, capabilities, address)
             }
         }
     }
@@ -1396,7 +1403,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         if (generation != importGeneration.get()) return
         // Cycling the IP mode can give the camera a new DHCP address; Tuya Local must follow it. Compare with the
         // host Tuya Local actually uses: re-importing an unchanged host opens a second connection the camera refuses.
-        val haHost = if (record != null && current.connectionVerified && capabilities.tuyaLan) {
+        val haHost = if (record != null && current.connectionVerified && capabilities.supportsTuyaLocal) {
             update { copy(onvifProgress = "Checking the camera's address in Home Assistant…") }
             try {
                 withContext(Dispatchers.IO) { homeAssistantClient.tuyaLocalHost(device.deviceId) }
