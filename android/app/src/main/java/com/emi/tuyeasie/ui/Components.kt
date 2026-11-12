@@ -3,8 +3,10 @@ package com.emi.tuyeasie.ui
 import android.content.ClipData
 import android.os.Build
 import android.os.PersistableBundle
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -137,6 +139,7 @@ fun EntityIcon(icon: ImageVector, tone: RowTone, imageUrl: String? = null, busy:
 }
 
 // Home Assistant's entity row: round tinted icon, name, state line, trailing action.
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun EntityRow(
     icon: @Composable () -> Unit,
@@ -144,6 +147,7 @@ fun EntityRow(
     state: String?,
     tone: RowTone = RowTone.NEUTRAL,
     onClick: (() -> Unit)? = null,
+    onLongClick: (() -> Unit)? = null,
     enabled: Boolean = true,
     trailing: @Composable RowScope.() -> Unit = {}
 ) {
@@ -156,7 +160,18 @@ fun EntityRow(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 64.dp)
-            .then(if (onClick != null) Modifier.clickable(enabled = enabled, role = Role.Button, onClick = onClick) else Modifier)
+            .then(
+                when {
+                    onLongClick != null -> Modifier.combinedClickable(
+                        enabled = enabled,
+                        role = Role.Button,
+                        onLongClick = onLongClick,
+                        onClick = onClick ?: {}
+                    )
+                    onClick != null -> Modifier.clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+                    else -> Modifier
+                }
+            )
             .padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp)
             .semantics { if (tone == RowTone.WORKING) liveRegion = LiveRegionMode.Polite },
         verticalAlignment = Alignment.CenterVertically,

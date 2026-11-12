@@ -1,6 +1,9 @@
 package com.emi.tuyeasie.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
@@ -12,6 +15,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AccountCircle
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -22,6 +27,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -38,6 +44,8 @@ fun DevicesScreen(
     padding: PaddingValues
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val clipboard = remember { context.getSystemService(ClipboardManager::class.java) }
     val devices = withUniqueNames(state.accounts.flatMap { entry -> entry.devices.orEmpty().map { entry to it } })
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(padding).padding(12.dp),
@@ -52,20 +60,49 @@ fun DevicesScreen(
             if (state.accounts.isEmpty()) CardText("No Tuya accounts on this phone yet. Pair a device or add your account in Settings.")
             if (state.accounts.isNotEmpty() && state.accounts.none { it.loading } && devices.isEmpty()) CardText("No devices yet.")
             devices.forEach { (entry, device) ->
-                EntityRow(
-                    icon = {
-                        EntityIcon(
-                            categoryIcon(device.activated.category),
-                            RowTone.NEUTRAL,
-                            imageUrl = device.iconUrl,
-                            busy = state.unpairingDeviceId == device.deviceId
+                var menuOpen by remember { mutableStateOf(false) }
+                val enabled = configureEnabled && state.unpairingDeviceId == null && !entry.loading
+                Box {
+                    EntityRow(
+                        icon = {
+                            EntityIcon(
+                                categoryIcon(device.activated.category),
+                                RowTone.NEUTRAL,
+                                imageUrl = device.iconUrl,
+                                busy = state.unpairingDeviceId == device.deviceId
+                            )
+                        },
+                        title = device.name,
+                        state = listOfNotNull(lanAddress(device.activated.ip), entry.saved.kind.label, device.homeName).joinToString(" · "),
+                        enabled = enabled,
+                        onClick = { onConfigureDevice(entry.saved, device) },
+                        onLongClick = { menuOpen = true }
+                    )
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Open") },
+                            onClick = { menuOpen = false; onConfigureDevice(entry.saved, device) }
                         )
-                    },
-                    title = device.name,
-                    state = listOfNotNull(lanAddress(device.activated.ip), entry.saved.kind.label, device.homeName).joinToString(" · "),
-                    enabled = configureEnabled && state.unpairingDeviceId == null && !entry.loading,
-                    onClick = { onConfigureDevice(entry.saved, device) }
-                )
+                        DropdownMenuItem(
+                            text = { Text("Copy device ID") },
+                            onClick = {
+                                menuOpen = false
+                                clipboard.setPrimaryClip(ClipData.newPlainText("Tuya device ID", device.deviceId))
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Copy local key") },
+                            onClick = {
+                                menuOpen = false
+                                clipboard.setPrimaryClip(sensitiveClip("Tuya local key", device.activated.localKey))
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Unpair", color = MaterialTheme.colorScheme.error) },
+                            onClick = { menuOpen = false; viewModel.requestUnpair(entry.saved, device) }
+                        )
+                    }
+                }
             }
         }
     }
