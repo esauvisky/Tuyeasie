@@ -25,11 +25,18 @@ data class TuyaManagedDevice(
     val productId: String,
     val homeName: String,
     val iconUrl: String?,
+    val capabilities: DeviceCapabilities,
     val activated: ActivatedDevice
 )
 
 class TuyaSdkException(val stage: String, val code: String, message: String) :
     RuntimeException("$stage failed ($code): $message")
+
+fun deviceCapabilities(bean: com.thingclips.smart.sdk.bean.DeviceBean): DeviceCapabilities = DeviceCapabilities(
+    dataPoints = bean.schemaMap.values.associate { it.code to it.id },
+    mac = bean.mac,
+    tuyaLan = bean.isHasLanCommunication()
+)
 
 class TuyaAccountRepository(context: Context, private val store: SecureSettingsStore) {
     private val appContext = context.applicationContext
@@ -70,6 +77,7 @@ class TuyaAccountRepository(context: Context, private val store: SecureSettingsS
                     productId = productId,
                     homeName = home.name,
                     iconUrl = it.iconUrl,
+                    capabilities = deviceCapabilities(it),
                     activated = ActivatedDevice(
                         deviceId = deviceId,
                         localKey = it.localKey,

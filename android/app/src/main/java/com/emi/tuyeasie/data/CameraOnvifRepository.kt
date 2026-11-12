@@ -1,5 +1,6 @@
 package com.emi.tuyeasie.data
 
+import android.content.Context
 import android.util.Log
 import com.alibaba.fastjson.JSON
 import com.thingclips.smart.home.sdk.ThingHomeSdk
@@ -7,11 +8,8 @@ import com.thingclips.smart.sdk.api.IDevListener
 import com.thingclips.smart.sdk.api.IResultCallback
 import com.thingclips.smart.sdk.api.IThingDevice
 import com.emi.tuyeasie.hass.HomeAssistantProtocol
-import java.io.ByteArrayOutputStream
-import java.io.InputStream
 import java.net.InetSocketAddress
 import java.net.Socket
-import java.security.MessageDigest
 import java.security.SecureRandom
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -27,16 +25,18 @@ import kotlin.coroutines.resumeWithException
 class CameraOnvifException(val stage: String, message: String, cause: Throwable? = null) :
     Exception("$stage: $message", cause)
 
-class CameraOnvifRepository {
+class CameraOnvifRepository(private val context: Context) {
     suspend fun configure(
         device: ActivatedDevice,
         existingPassword: String?,
+        targetPassword: String,
         onProgress: (String) -> Unit,
         savePassword: suspend (String) -> Unit
     ): OnvifRecord {
         val oldPassword = existingPassword ?: DEFAULT_PASSWORD
-        // Always rotate: the camera refuses a change whose new password equals the current one (onvif_change_pwd errcode 2).
-        val password = generatePassword()
+        // The camera refuses a "change" to the password it already has (onvif_change_pwd errcode 2), and only reports
+        // ONVIF as ready once a change happened, so reaching the factory default takes a two-step rotation.
+        val password = if (oldPassword == targetPassword) generatePassword() else targetPassword
         val camera = Camera(
             ThingHomeSdk.newDeviceInstance(device.deviceId),
             device.deviceId,
@@ -49,6 +49,7 @@ class CameraOnvifRepository {
             // The camera rejects a password change once ONVIF is already on, so set the password first.
             onProgress("Setting the ONVIF password…")
             changePassword(camera, oldPassword, password, savePassword)
+            if (password != targetPassword) changePassword(camera, password, targetPassword, savePassword)
             Log.d(TAG, "onvif_change_pwd confirmed res=ok, turning ONVIF on")
             onProgress("Turning ONVIF on…")
             publish(camera, "ONVIF switch (DP ${dps.switch})", """{"${dps.switch}":true}""")
@@ -76,42 +77,49 @@ class CameraOnvifRepository {
             address = verifyState(camera)
         } catch (e: CameraOnvifException) {
             val message = checkNotNull(e.message)
-            val sanitized = message.replace(password, "[redacted]")
+            val sanitized = message.replace(password, "[redacted]").replace(targetPassword, "[redacted]")
             if (sanitized == message) throw e
             // The cause is omitted: it carries the unredacted message and would leak the new password into crash logs.
             throw CameraOnvifException(e.stage, sanitized.removePrefix("${e.stage}: "))
         } finally {
             camera.sdk.onDestroy()
         }
-        onProgress("Checking both RTSP streams at $address…")
-        val mainUrl = "rtsp://$address:8554/stream0"
-        val subUrl = "rtsp://$address:8554/stream1"
-        val (mainInfo, subInfo) = withContext(Dispatchers.IO) {
-            describe(address, mainUrl, password, "stream0") to describe(address, subUrl, password, "stream1")
-        }
+        onProgress("Reading the camera's streams over ONVIF at $address…")
+        val info = withContext(Dispatchers.IO) { readStreams(address, targetPassword) }
+        val main = info.streams[0]
+        val sub = info.streams.getOrNull(1)
         return OnvifRecord(
             deviceId = device.deviceId,
             address = address,
-            password = password,
-            mainUrl = mainUrl,
-            subUrl = subUrl,
-            mainCodec = mainInfo.codec,
-            mainResolution = mainInfo.resolution,
-            subCodec = subInfo.codec,
-            subResolution = subInfo.resolution,
+            username = DEFAULT_USERNAME,
+            password = targetPassword,
+            mainUrl = main.url,
+            subUrl = sub?.url,
+            mainCodec = main.codec,
+            mainResolution = main.resolution,
+            subCodec = sub?.codec,
+            subResolution = sub?.resolution,
             verified = true
         )
     }
 
-    // A null password means no ONVIF password was ever sent to this camera, so it still has the factory default.
-    fun unverifiedRecord(device: ActivatedDevice, address: String, knownPassword: String?) = OnvifRecord(
-        deviceId = device.deviceId,
-        address = address,
-        password = knownPassword ?: DEFAULT_PASSWORD,
-        mainUrl = "rtsp://$address:$RTSP_PORT/stream0",
-        subUrl = "rtsp://$address:$RTSP_PORT/stream1",
-        verified = false
-    )
+    // Blocking. The ONVIF port differs between firmwares, so the camera's own discovery answer gives the service address.
+    private fun readStreams(address: String, password: String): OnvifInfo {
+        val stage = "ONVIF streams"
+        val serviceUrl = OnvifDiscovery.discover(context).firstOrNull { it.ip == address }?.serviceUrls?.first()
+            ?: throw CameraOnvifException(stage, "the camera at $address did not answer ONVIF discovery")
+        val info = try {
+            OnvifClient().probe(serviceUrl, DEFAULT_USERNAME, password)
+        } catch (e: OnvifException) {
+            throw CameraOnvifException(stage, "${e.message} ($serviceUrl)", e)
+        } catch (e: java.io.IOException) {
+            throw CameraOnvifException(stage, "${e.javaClass.simpleName}: ${e.message} ($serviceUrl)", e)
+        } catch (e: IllegalStateException) {
+            throw CameraOnvifException(stage, "${e.message} ($serviceUrl)", e)
+        }
+        if (info.streams.isEmpty()) throw CameraOnvifException(stage, "the camera reported no stream profiles ($serviceUrl)")
+        return info
+    }
 
     private suspend fun changePassword(
         camera: Camera,
@@ -335,160 +343,9 @@ class CameraOnvifRepository {
         }
     }
 
-    private fun describe(address: String, url: String, password: String, path: String): StreamInfo {
-        val stage = "RTSP probe $path"
-        try {
-            return describeUnwrapped(address, url, password, path)
-        } catch (e: CameraOnvifException) {
-            throw e
-        } catch (e: java.io.IOException) {
-            throw CameraOnvifException(stage, "${e.javaClass.simpleName}: ${e.message} (rtsp://$address:$RTSP_PORT/$path)", e)
-        } catch (e: IllegalStateException) {
-            throw CameraOnvifException(stage, "${e.message} (rtsp://$address:$RTSP_PORT/$path)", e)
-        } catch (e: NumberFormatException) {
-            throw CameraOnvifException(stage, "malformed number in response: ${e.message} (rtsp://$address:$RTSP_PORT/$path)", e)
-        }
-    }
-
-    private fun describeUnwrapped(address: String, url: String, password: String, path: String): StreamInfo {
-        fun fail(reason: String): Nothing =
-            throw CameraOnvifException("RTSP probe $path", "$reason (rtsp://$address:$RTSP_PORT/$path)")
-
-        var response = rtspDescribe(address, url, null)
-        if (response.status == 401) {
-            val challenges = response.headers["www-authenticate"].orEmpty()
-            val digest = challenges.firstOrNull { it.startsWith("Digest", ignoreCase = true) }
-            val basic = challenges.firstOrNull { it.startsWith("Basic", ignoreCase = true) }
-            val authorization = when {
-                digest != null -> digestAuthorization(digest, url, password)
-                basic != null -> "Basic " + java.util.Base64.getEncoder()
-                    .encodeToString("$USERNAME:$password".toByteArray())
-                else -> fail("401 without a Basic or Digest challenge")
-            }
-            response = rtspDescribe(address, url, authorization)
-        }
-        if (response.status != 200) fail("DESCRIBE returned ${response.status} ${response.reason}")
-        return parseSdp(response.body) ?: fail("SDP has no video media section")
-    }
-
-    private class RtspResponse(
-        val status: Int,
-        val reason: String,
-        val headers: Map<String, List<String>>,
-        val body: String
-    )
-
-    private class StreamInfo(val codec: String?, val resolution: String?)
-
-    private fun rtspDescribe(address: String, url: String, authorization: String?): RtspResponse {
-        Socket().use { socket ->
-            socket.connect(InetSocketAddress(address, RTSP_PORT), RTSP_TIMEOUT_MS)
-            socket.soTimeout = RTSP_TIMEOUT_MS
-            val request = buildString {
-                append("DESCRIBE $url RTSP/1.0\r\n")
-                append("CSeq: 1\r\n")
-                append("Accept: application/sdp\r\n")
-                append("User-Agent: tuyeasie\r\n")
-                if (authorization != null) append("Authorization: $authorization\r\n")
-                append("\r\n")
-            }
-            socket.getOutputStream().apply {
-                write(request.toByteArray(Charsets.US_ASCII))
-                flush()
-            }
-            return readResponse(socket.getInputStream())
-        }
-    }
-
-    private fun readResponse(input: InputStream): RtspResponse {
-        val head = ByteArrayOutputStream()
-        var tail = 0
-        while (tail != 0x0d0a0d0a) {
-            val b = input.read()
-            if (b < 0) throw java.io.EOFException("connection closed before RTSP headers ended")
-            head.write(b)
-            tail = (tail shl 8) or b
-        }
-        val lines = head.toString(Charsets.ISO_8859_1.name()).split("\r\n").filter { it.isNotEmpty() }
-        val statusLine = lines.first().split(" ", limit = 3)
-        check(statusLine.size >= 2 && statusLine[0].startsWith("RTSP/")) { "Malformed RTSP status line: ${lines.first()}" }
-        val headers = mutableMapOf<String, MutableList<String>>()
-        for (line in lines.drop(1)) {
-            val separator = line.indexOf(':')
-            check(separator > 0) { "Malformed RTSP header: $line" }
-            headers.getOrPut(line.substring(0, separator).trim().lowercase()) { mutableListOf() }
-                .add(line.substring(separator + 1).trim())
-        }
-        val length = headers["content-length"]?.first()?.toInt() ?: 0
-        val body = ByteArray(length)
-        var read = 0
-        while (read < length) {
-            val n = input.read(body, read, length - read)
-            if (n < 0) throw java.io.EOFException("connection closed inside RTSP body")
-            read += n
-        }
-        return RtspResponse(
-            statusLine[1].toInt(),
-            statusLine.getOrElse(2) { "" },
-            headers,
-            String(body, Charsets.UTF_8)
-        )
-    }
-
-    private fun digestAuthorization(challenge: String, url: String, password: String): String {
-        val params = Regex("""(\w+)=(?:"([^"]*)"|([^,\s]+))""")
-            .findAll(challenge.substring("Digest".length))
-            .associate { it.groupValues[1].lowercase() to (it.groups[2]?.value ?: it.groupValues[3]) }
-        val realm = checkNotNull(params["realm"]) { "Digest challenge has no realm" }
-        val nonce = checkNotNull(params["nonce"]) { "Digest challenge has no nonce" }
-        val qop = params["qop"]?.split(",")?.map { it.trim() }?.firstOrNull { it == "auth" }
-        check(params["qop"] == null || qop != null) { "Digest qop ${params["qop"]} does not offer auth" }
-        val ha1 = md5("$USERNAME:$realm:$password")
-        val ha2 = md5("DESCRIBE:$url")
-        val header = StringBuilder("Digest username=\"$USERNAME\", realm=\"$realm\", nonce=\"$nonce\", uri=\"$url\"")
-        val response = if (qop != null) {
-            val nc = "00000001"
-            val cnonce = generateToken(16)
-            header.append(", qop=auth, nc=$nc, cnonce=\"$cnonce\"")
-            md5("$ha1:$nonce:$nc:$cnonce:auth:$ha2")
-        } else {
-            md5("$ha1:$nonce:$ha2")
-        }
-        header.append(", response=\"$response\"")
-        params["opaque"]?.let { header.append(", opaque=\"$it\"") }
-        return header.toString()
-    }
-
-    private fun parseSdp(sdp: String): StreamInfo? {
-        val lines = sdp.lines().map { it.trim() }
-        val start = lines.indexOfFirst { it.startsWith("m=video") }
-        if (start < 0) return null
-        val section = lines.drop(start + 1).takeWhile { !it.startsWith("m=") }
-        val codec = section.firstNotNullOfOrNull {
-            Regex("""^a=rtpmap:\d+\s+([A-Za-z0-9]+)/""").find(it)?.groupValues?.get(1)
-        }?.uppercase()?.let {
-            when (it) {
-                "H265", "HEVC" -> "H265"
-                "H264" -> "H264"
-                else -> it
-            }
-        }
-        val resolution = section.firstNotNullOfOrNull {
-            Regex("""^a=x-dimensions:\s*(\d+)\s*,\s*(\d+)""").find(it)?.let { m -> "${m.groupValues[1]}x${m.groupValues[2]}" }
-                ?: Regex("""^a=framesize:\d+\s+(\d+)-(\d+)""").find(it)?.let { m -> "${m.groupValues[1]}x${m.groupValues[2]}" }
-        }
-        return StreamInfo(codec, resolution)
-    }
-
-    private fun md5(value: String) =
-        MessageDigest.getInstance("MD5").digest(value.toByteArray(Charsets.ISO_8859_1))
-            .joinToString("") { "%02x".format(it) }
-
-    private fun generatePassword() = generateToken(PASSWORD_LENGTH)
-
-    private fun generateToken(length: Int): String {
+    private fun generatePassword(): String {
         val random = SecureRandom()
-        return buildString { repeat(length) { append(ALPHABET[random.nextInt(ALPHABET.length)]) } }
+        return buildString { repeat(PASSWORD_LENGTH) { append(ALPHABET[random.nextInt(ALPHABET.length)]) } }
     }
 
     companion object {
@@ -496,14 +353,13 @@ class CameraOnvifRepository {
         const val DEFAULT_PASSWORD = "admin"
 
         private const val TAG = "CameraOnvif"
-        const val USERNAME = "admin"
-        const val PASSWORD_LENGTH = 20
-        const val ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-        const val SDK_TIMEOUT_MS = 15_000L
-        const val ONLINE_TIMEOUT_MS = 60_000L
+        const val DEFAULT_USERNAME = "admin"
+        private const val PASSWORD_LENGTH = 20
+        private const val ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        private const val SDK_TIMEOUT_MS = 15_000L
+        private const val ONLINE_TIMEOUT_MS = 60_000L
         // Confirmation waits include a possible reconnect while the camera is offline.
         const val STATE_TIMEOUT_MS = ONLINE_TIMEOUT_MS + SDK_TIMEOUT_MS
-        const val RTSP_PORT = 8554
-        const val RTSP_TIMEOUT_MS = 10_000
+        private const val RTSP_PORT = 8554
     }
 }

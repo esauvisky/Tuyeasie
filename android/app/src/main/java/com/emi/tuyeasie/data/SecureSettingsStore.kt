@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import java.security.SecureRandom
+import org.json.JSONArray
+import org.json.JSONObject
 
 data class AppSettings(
     val hassUrl: String = "",
@@ -37,9 +39,10 @@ data class TuyaAccount(
 data class OnvifRecord(
     val deviceId: String,
     val address: String,
+    val username: String,
     val password: String,
     val mainUrl: String,
-    val subUrl: String,
+    val subUrl: String?,
     val destination: String? = null,
     val registered: Boolean = false,
     val mainCodec: String? = null,
@@ -49,7 +52,7 @@ data class OnvifRecord(
     val verified: Boolean
 ) {
     override fun toString() =
-        "OnvifRecord(deviceId=$deviceId, address=$address, password=[redacted], " +
+        "OnvifRecord(deviceId=$deviceId, address=$address, username=$username, password=[redacted], " +
             "mainUrl=[redacted], subUrl=[redacted], destination=$destination, registered=$registered, " +
             "mainCodec=$mainCodec, mainResolution=$mainResolution, subCodec=$subCodec, subResolution=$subResolution, verified=$verified)"
 }
@@ -172,9 +175,12 @@ class SecureSettingsStore(context: Context) {
         return OnvifRecord(
             deviceId = deviceId,
             address = address,
+            // Records stored before usernames were kept all used the cameras' fixed "admin" user.
+            username = preferences.getString(onvifKey(deviceId, "username"), "admin")!!,
             password = required("password"),
             mainUrl = required("main_url"),
-            subUrl = required("sub_url"),
+            // Single-stream devices have no substream.
+            subUrl = preferences.getString(onvifKey(deviceId, "sub_url"), null),
             destination = preferences.getString(onvifKey(deviceId, "destination"), null),
             registered = preferences.getBoolean(onvifKey(deviceId, "registered"), false),
             mainCodec = preferences.getString(onvifKey(deviceId, "main_codec"), null),
@@ -197,6 +203,18 @@ class SecureSettingsStore(context: Context) {
     fun loadPendingOnvifPassword(deviceId: String): String? =
         preferences.getString(onvifKey(deviceId, "pending_password"), null)
 
+    fun loadPendingOnvifUsername(deviceId: String): String? =
+        preferences.getString(onvifKey(deviceId, "pending_username"), null)
+
+    /** Credentials entered for a device that has no ONVIF record yet; saving a record clears them. */
+    fun saveOnvifCredentials(deviceId: String, username: String, password: String) {
+        val committed = preferences.edit()
+            .putString(onvifKey(deviceId, "pending_username"), username)
+            .putString(onvifKey(deviceId, "pending_password"), password)
+            .commit()
+        check(committed) { "Unable to persist ONVIF credentials" }
+    }
+
     fun savePendingOnvifPassword(deviceId: String, password: String) {
         val committed = preferences.edit()
             .putString(onvifKey(deviceId, "pending_password"), password)
@@ -207,10 +225,16 @@ class SecureSettingsStore(context: Context) {
     fun saveOnvifRecord(record: OnvifRecord) {
         val committed = preferences.edit()
             .remove(onvifKey(record.deviceId, "pending_password"))
+            .remove(onvifKey(record.deviceId, "pending_username"))
             .putString(onvifKey(record.deviceId, "address"), record.address)
+            .putString(onvifKey(record.deviceId, "username"), record.username)
             .putString(onvifKey(record.deviceId, "password"), record.password)
             .putString(onvifKey(record.deviceId, "main_url"), record.mainUrl)
-            .putString(onvifKey(record.deviceId, "sub_url"), record.subUrl)
+            .apply {
+                // A null string would be stored as a null entry, which the secret redaction can't read.
+                if (record.subUrl == null) remove(onvifKey(record.deviceId, "sub_url"))
+                else putString(onvifKey(record.deviceId, "sub_url"), record.subUrl)
+            }
             .putString(onvifKey(record.deviceId, "destination"), record.destination)
             .putBoolean(onvifKey(record.deviceId, "registered"), record.registered)
             .putString(onvifKey(record.deviceId, "main_codec"), record.mainCodec)
@@ -220,6 +244,103 @@ class SecureSettingsStore(context: Context) {
             .putBoolean(onvifKey(record.deviceId, "verified"), record.verified)
             .commit()
         check(committed) { "Unable to persist ONVIF record" }
+    }
+
+    fun loadCapabilities(deviceId: String): DeviceCapabilities? {
+        val raw = preferences.getString(KEY_CAPABILITIES_PREFIX + deviceId, null) ?: return null
+        val json = JSONObject(raw)
+        val points = json.getJSONObject("dataPoints")
+        return DeviceCapabilities(
+            dataPoints = points.keys().asSequence().associateWith { points.getString(it) },
+            mac = if (json.isNull("mac")) null else json.getString("mac"),
+            tuyaLan = json.getBoolean("tuyaLan")
+        )
+    }
+
+    fun saveCapabilities(deviceId: String, capabilities: DeviceCapabilities) {
+        val json = JSONObject()
+            .put("dataPoints", JSONObject(capabilities.dataPoints))
+            .put("mac", capabilities.mac ?: JSONObject.NULL)
+            .put("tuyaLan", capabilities.tuyaLan)
+        val committed = preferences.edit().putString(KEY_CAPABILITIES_PREFIX + deviceId, json.toString()).commit()
+        check(committed) { "Unable to persist device capabilities" }
+    }
+
+    fun loadNetworkReport(deviceId: String): NetworkReport? {
+        val raw = preferences.getString(KEY_NETWORK_PREFIX + deviceId, null) ?: return null
+        val json = JSONObject(raw)
+        fun JSONObject.optText(name: String): String? = if (isNull(name)) null else getString(name)
+        fun streams(array: JSONArray) = (0 until array.length()).map { index ->
+            val stream = array.getJSONObject(index)
+            DetectedStream(
+                name = stream.getString("name"),
+                url = stream.getString("url"),
+                codec = stream.optText("codec"),
+                resolution = stream.optText("resolution"),
+                source = StreamSource.valueOf(stream.getString("source"))
+            )
+        }
+        val ports = json.getJSONArray("openPorts")
+        val onvif = if (json.isNull("onvif")) null else json.getJSONObject("onvif")
+        return NetworkReport(
+            ip = json.getString("ip"),
+            addressSource = AddressSource.valueOf(json.getString("addressSource")),
+            scannedAt = json.getLong("scannedAt"),
+            openPorts = (0 until ports.length()).map { index ->
+                val port = ports.getJSONObject(index)
+                OpenPort(port.getInt("port"), port.getString("service"), port.getString("description"), port.optText("detail"))
+            },
+            onvif = onvif?.let {
+                OnvifInfo(
+                    serviceUrl = it.getString("serviceUrl"),
+                    manufacturer = it.optText("manufacturer"),
+                    model = it.optText("model"),
+                    firmware = it.optText("firmware"),
+                    mac = it.optText("mac"),
+                    authRequired = it.getBoolean("authRequired"),
+                    streams = streams(it.getJSONArray("streams"))
+                )
+            },
+            onvifError = json.optText("onvifError"),
+            portScanStreams = streams(json.getJSONArray("portScanStreams"))
+        )
+    }
+
+    fun saveNetworkReport(deviceId: String, report: NetworkReport) {
+        fun Any?.orNull(): Any = this ?: JSONObject.NULL
+        fun streams(list: List<DetectedStream>) = JSONArray(list.map {
+            JSONObject()
+                .put("name", it.name)
+                .put("url", it.url)
+                .put("codec", it.codec.orNull())
+                .put("resolution", it.resolution.orNull())
+                .put("source", it.source.name)
+        })
+        val json = JSONObject()
+            .put("ip", report.ip)
+            .put("addressSource", report.addressSource.name)
+            .put("scannedAt", report.scannedAt)
+            .put("openPorts", JSONArray(report.openPorts.map {
+                JSONObject()
+                    .put("port", it.port)
+                    .put("service", it.service)
+                    .put("description", it.description)
+                    .put("detail", it.detail.orNull())
+            }))
+            .put("onvif", report.onvif?.let {
+                JSONObject()
+                    .put("serviceUrl", it.serviceUrl)
+                    .put("manufacturer", it.manufacturer.orNull())
+                    .put("model", it.model.orNull())
+                    .put("firmware", it.firmware.orNull())
+                    .put("mac", it.mac.orNull())
+                    .put("authRequired", it.authRequired)
+                    .put("streams", streams(it.streams))
+            }.orNull())
+            .put("onvifError", report.onvifError.orNull())
+            .put("portScanStreams", streams(report.portScanStreams))
+        val committed = preferences.edit().putString(KEY_NETWORK_PREFIX + deviceId, json.toString()).commit()
+        check(committed) { "Unable to persist network report" }
     }
 
     private fun onvifKey(deviceId: String, field: String) = "${ONVIF_PREFIX}${deviceId}_$field"
@@ -312,6 +433,8 @@ class SecureSettingsStore(context: Context) {
         const val KEY_EXTRA_PASSWORD_PREFIX = "extra_tuya_password_"
         const val ONVIF_PREFIX = "onvif_"
         const val ONVIF_ADDRESS_SUFFIX = "_address"
+        const val KEY_CAPABILITIES_PREFIX = "capabilities_"
+        const val KEY_NETWORK_PREFIX = "network_"
         const val KEY_DEVICE_ID = "device_id"
         const val KEY_LOCAL_KEY = "device_local_key"
         const val KEY_DEVICE_NAME = "device_name"
