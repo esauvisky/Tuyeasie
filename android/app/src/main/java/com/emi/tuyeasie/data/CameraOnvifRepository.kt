@@ -35,33 +35,42 @@ class CameraOnvifRepository {
         savePassword: suspend (String) -> Unit
     ): OnvifRecord {
         val oldPassword = existingPassword ?: DEFAULT_PASSWORD
-        // Always rotate: the camera refuses a change whose new password equals the current one (DP 238 errcode 2).
+        // Always rotate: the camera refuses a change whose new password equals the current one (onvif_change_pwd errcode 2).
         val password = generatePassword()
-        val camera = Camera(ThingHomeSdk.newDeviceInstance(device.deviceId), device.deviceId, onProgress)
+        val camera = Camera(
+            ThingHomeSdk.newDeviceInstance(device.deviceId),
+            device.deviceId,
+            onvifDps(device.deviceId),
+            onProgress
+        )
+        val dps = camera.dps
         val address: String
         try {
             // The camera rejects a password change once ONVIF is already on, so set the password first.
             onProgress("Setting the ONVIF password…")
             changePassword(camera, oldPassword, password, savePassword)
-            Log.d(TAG, "DP238 confirmed res=ok, turning ONVIF on")
+            Log.d(TAG, "onvif_change_pwd confirmed res=ok, turning ONVIF on")
             onProgress("Turning ONVIF on…")
-            publish(camera, "ONVIF switch (DP 237)", """{"237":true}""")
-            awaitDp(camera, "ONVIF switch on confirmation (DP 237)", "237", true)
+            publish(camera, "ONVIF switch (DP ${dps.switch})", """{"${dps.switch}":true}""")
+            awaitDp(camera, "ONVIF switch on confirmation (DP ${dps.switch})", dps.switch, true)
             // The camera only (re)starts its ONVIF and RTSP servers when the IP mode actually changes, so flip it to
             // the other mode and back. Forcing dynamic then static does nothing on the first step when the camera is
             // already dynamic, and it would leave a dynamic camera on static.
-            val mode = readDp(camera, "ONVIF IP mode read (DP 241)", "241")
+            val mode = readDp(camera, "ONVIF IP mode read (DP ${dps.ipType})", dps.ipType)
             if (mode != "0" && mode != "1") {
-                throw CameraOnvifException("ONVIF IP mode read (DP 241)", "camera reported IP mode '$mode', expected 0 or 1")
+                throw CameraOnvifException(
+                    "ONVIF IP mode read (DP ${dps.ipType})",
+                    "camera reported IP mode '$mode', expected 0 or 1"
+                )
             }
             val flipped = if (mode == "0") "1" else "0"
             onProgress("Toggling the camera's IP mode to start ONVIF…")
-            publish(camera, "ONVIF IP mode toggle (DP 241)", """{"241":"$flipped"}""")
-            awaitDp(camera, "ONVIF IP mode toggle confirmation (DP 241)", "241", flipped)
+            publish(camera, "ONVIF IP mode toggle (DP ${dps.ipType})", """{"${dps.ipType}":"$flipped"}""")
+            awaitDp(camera, "ONVIF IP mode toggle confirmation (DP ${dps.ipType})", dps.ipType, flipped)
             delay(1500)
             onProgress("Restoring the camera's IP mode…")
-            publish(camera, "ONVIF IP mode restore (DP 241)", """{"241":"$mode"}""")
-            awaitDp(camera, "ONVIF IP mode restore confirmation (DP 241)", "241", mode)
+            publish(camera, "ONVIF IP mode restore (DP ${dps.ipType})", """{"${dps.ipType}":"$mode"}""")
+            awaitDp(camera, "ONVIF IP mode restore confirmation (DP ${dps.ipType})", dps.ipType, mode)
             delay(1500)
             onProgress("Waiting for the camera to report its ONVIF address…")
             address = verifyState(camera)
@@ -110,25 +119,26 @@ class CameraOnvifRepository {
         password: String,
         savePassword: suspend (String) -> Unit
     ) {
-        val stage = "ONVIF password result (DP 238)"
+        val dp = camera.dps.changePassword
+        val stage = "ONVIF password result (DP $dp)"
         val result = CompletableDeferred<Unit>()
         val listener = object : IDevListener {
             override fun onDpUpdate(devId: String, dpStr: String) {
-                val raw = JSON.parseObject(dpStr)["238"] as? String ?: return
-                Log.d(TAG, "DP238 update received")
+                val raw = JSON.parseObject(dpStr)[dp] as? String ?: return
+                Log.d(TAG, "DP$dp update received")
                 if (raw.isBlank()) {
-                    Log.d(TAG, "DP238 update is blank, ignoring")
+                    Log.d(TAG, "DP$dp update is blank, ignoring")
                     return
                 }
                 try {
                     val json = JSON.parseObject(raw) ?: return
                     // Our own published payload may echo back without a result; only a payload carrying "res" is the device's answer.
                     if (!json.containsKey("res")) {
-                        Log.d(TAG, "DP238 update has no res field, ignoring (echo)")
+                        Log.d(TAG, "DP$dp update has no res field, ignoring (echo)")
                         return
                     }
                     val res = json.getString("res")
-                    Log.d(TAG, "DP238 res=$res errcode=${json["errcode"]}")
+                    Log.d(TAG, "DP$dp res=$res errcode=${json["errcode"]}")
                     if (res == "ok") {
                         result.complete(Unit)
                     } else {
@@ -138,7 +148,7 @@ class CameraOnvifRepository {
                     }
                 } catch (e: Exception) {
                     result.completeExceptionally(
-                        CameraOnvifException(stage, "unparseable DP238 result (${e.javaClass.simpleName})")
+                        CameraOnvifException(stage, "unparseable DP$dp result (${e.javaClass.simpleName})")
                     )
                 }
             }
@@ -157,19 +167,19 @@ class CameraOnvifRepository {
             savePassword(password)
             publish(
                 camera,
-                "ONVIF password (DP 238)",
+                "ONVIF password (DP $dp)",
                 JSON.toJSONString(
                     mapOf(
-                        "238" to JSON.toJSONString(mapOf("oldpwd" to oldPassword, "newpwd" to password))
+                        dp to JSON.toJSONString(mapOf("oldpwd" to oldPassword, "newpwd" to password))
                     )
                 )
             )
-            awaitCallback(camera, "ONVIF password read (DP 238)") { callback -> camera.sdk.getDpList(listOf("238"), callback) }
+            awaitCallback(camera, "ONVIF password read (DP $dp)") { callback -> camera.sdk.getDpList(listOf(dp), callback) }
             try {
                 withTimeout(SDK_TIMEOUT_MS) { result.await() }
             } catch (e: TimeoutCancellationException) {
-                Log.e(TAG, "DP238 result timed out")
-                throw CameraOnvifException(stage, "timed out waiting for DP238 result with res", e)
+                Log.e(TAG, "DP$dp result timed out")
+                throw CameraOnvifException(stage, "timed out waiting for DP$dp result with res", e)
             }
         } catch (e: CameraOnvifException) {
             if (e.message?.contains("res=failed") == true) {
@@ -181,7 +191,40 @@ class CameraOnvifRepository {
         }
     }
 
-    private class Camera(val sdk: IThingDevice, val deviceId: String, val onProgress: (String) -> Unit)
+    private class Camera(
+        val sdk: IThingDevice,
+        val deviceId: String,
+        val dps: OnvifDps,
+        val onProgress: (String) -> Unit
+    )
+
+    /** ONVIF data point IDs differ between camera models; their codes do not. */
+    private class OnvifDps(
+        val switch: String,
+        val ipAddress: String,
+        val passwordChanged: String,
+        val changePassword: String,
+        val ipType: String
+    )
+
+    private fun onvifDps(deviceId: String): OnvifDps {
+        val schema = checkNotNull(ThingHomeSdk.getDataInstance().getSchema(deviceId)) {
+            "Tuya SDK has no schema for $deviceId"
+        }
+        val idsByCode = schema.values.associate { it.code to it.id }
+        fun id(code: String) = idsByCode[code] ?: throw CameraOnvifException(
+            "ONVIF data points",
+            "this camera has no $code data point, so Tuya cannot switch its ONVIF on " +
+                "(ONVIF codes it has: ${idsByCode.keys.filter { it.startsWith("onvif") }.sorted().ifEmpty { listOf("none") }})"
+        )
+        return OnvifDps(
+            switch = id("onvif_switch"),
+            ipAddress = id("onvif_ip_addr"),
+            passwordChanged = id("onvif_pw_changed"),
+            changePassword = id("onvif_change_pwd"),
+            ipType = id("onvif_iptype_config")
+        )
+    }
 
     private suspend fun publish(camera: Camera, stage: String, payload: String) {
         Log.d(TAG, "publish start: $stage")
@@ -212,7 +255,8 @@ class CameraOnvifRepository {
         withTimeoutOrNull(SDK_TIMEOUT_MS) {
             suspendCancellableCoroutine<Unit> { continuation ->
                 start(object : IResultCallback {
-                    override fun onError(code: String, error: String) {
+                    // publishDps reports some failures with a null message; only the code is guaranteed.
+                    override fun onError(code: String, error: String?) {
                         Log.e(TAG, "callback error: $stage code=$code")
                         continuation.resumeWithException(CameraOnvifException(stage, "code $code: $error"))
                     }
@@ -246,26 +290,30 @@ class CameraOnvifRepository {
     }
 
     // getDpList refreshes the SDK's cached DPs but fires no update for unchanged values, so read the cache.
-    // The IP-mode cycle can move the camera to a new DHCP address, so DP 240 counts only once RTSP answers there.
+    // The IP-mode cycle can move the camera to a new DHCP address, so onvif_ip_addr counts only once RTSP answers there.
     private suspend fun verifyState(camera: Camera): String {
         val stage = "ONVIF state verification"
+        val dps = camera.dps
         var last = "nothing read yet"
         Log.d(TAG, "verify start")
         val address = withTimeoutOrNull(STATE_TIMEOUT_MS) {
             var found: String? = null
             while (found == null) {
                 awaitCallback(camera, stage) { callback ->
-                    camera.sdk.getDpList(listOf("237", "239", "240"), callback)
+                    camera.sdk.getDpList(listOf(dps.switch, dps.passwordChanged, dps.ipAddress), callback)
                 }
-                val dps = deviceBean(camera).dps
-                val ip = dps["240"] as? String
+                val values = deviceBean(camera).dps
+                val switch = values[dps.switch]
+                val passwordChanged = values[dps.passwordChanged]
+                val ip = values[dps.ipAddress] as? String
                 val reachable = ip != null && HomeAssistantProtocol.isRfc1918Address(ip) && rtspReachable(ip)
-                last = "237=${dps["237"]}, 239=${dps["239"]}, 240=$ip, RTSP reachable=$reachable"
+                last = "${dps.switch}=$switch, ${dps.passwordChanged}=$passwordChanged, ${dps.ipAddress}=$ip, " +
+                    "RTSP reachable=$reachable"
                 Log.d(TAG, "verify read: $last")
-                if (dps["237"] == true && dps["239"] == true && reachable) {
+                if (switch == true && passwordChanged == true && reachable) {
                     found = ip
                 } else {
-                    if (dps["237"] == false) publish(camera, "ONVIF switch (DP 237)", """{"237":true}""")
+                    if (switch == false) publish(camera, "ONVIF switch (DP ${dps.switch})", """{"${dps.switch}":true}""")
                     delay(2000)
                 }
             }
@@ -273,7 +321,8 @@ class CameraOnvifRepository {
         }
         return address ?: throw CameraOnvifException(
             stage,
-            "timed out waiting for 237=true, 239=true and RTSP on the private IPv4 in 240; last seen: $last"
+            "timed out waiting for ${dps.switch}=true, ${dps.passwordChanged}=true and RTSP on the private IPv4 in " +
+                "${dps.ipAddress}; last seen: $last"
         )
     }
 
