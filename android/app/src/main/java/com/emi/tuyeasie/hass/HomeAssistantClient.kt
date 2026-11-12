@@ -54,7 +54,7 @@ class HomeAssistantException(
 
 class HomeAssistantClient(
     private val settingsStore: SecureSettingsStore,
-    private val httpClient: OkHttpClient = OkHttpClient()
+    private val httpClient: OkHttpClient = DEFAULT_HTTP_CLIENT
 ) {
     fun testConnection(): Boolean {
         openSession().use { session ->
@@ -295,16 +295,63 @@ class HomeAssistantClient(
      * Entries already removed in Home Assistant are skipped. Returns how many entries were deleted.
      */
     fun removeDevice(deviceId: String, entryIds: List<String>, legacyCameraTitles: List<String>): Int {
-        val targets = openVerifiedSession().use { session ->
-            val existing = session.callCommand("config_entries/get").getJSONArray("result")
-                ?.let { entries -> (0 until entries.size).map { checkNotNull(entries.getJSONObject(it).getString("entry_id")) }.toSet() }
+        val targets = withVerifiedSession { session ->
+            val entries = session.callCommand("config_entries/get").getJSONArray("result")
                 ?: throw invalidResponse("Home Assistant returned no config-entry list.")
-            (listOfNotNull(findTuyaLocalEntryId(session, deviceId)) + entryIds + legacyCameraTitles.mapNotNull(::findCameraEntryId))
+            val existing = mutableSetOf<String>()
+            val legacyIds = mutableListOf<String>()
+            for (index in 0 until entries.size) {
+                val entry = entries.getJSONObject(index)
+                val id = checkNotNull(entry.getString("entry_id")) { "A config entry has no entry ID" }
+                existing += id
+                if (entry.getString("domain") == "generic" && entry.getString("title") in legacyCameraTitles) {
+                    legacyIds += id
+                }
+            }
+            (listOfNotNull(findTuyaLocalEntryId(session, deviceId)) + entryIds + legacyIds)
                 .distinct()
                 .filter { it in existing }
         }
-        targets.forEach { httpRequest("DELETE", "/api/config/config_entries/entry/$it", null) }
+        targets.forEach { entryId ->
+            try {
+                httpRequest("DELETE", "/api/config/config_entries/entry/$entryId", null)
+            } catch (e: HomeAssistantException) {
+                // If an earlier attempt timed out while Home Assistant was still unloading the entry, the entry is now gone.
+                val stillPresent = withVerifiedSession { session ->
+                    val entries = session.callCommand("config_entries/get").getJSONArray("result")
+                        ?: throw invalidResponse("Home Assistant returned no config-entry list.")
+                    (0 until entries.size).any { entries.getJSONObject(it).getString("entry_id") == entryId }
+                }
+                if (stillPresent) throw e
+            }
+        }
         return targets.size
+    }
+
+    private fun <T> withVerifiedSession(block: (WebSocketSession) -> T): T {
+        val reconnectDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RECONNECT_WINDOW_SECONDS)
+        while (true) {
+            val session = try {
+                openVerifiedSession()
+            } catch (exception: HomeAssistantException) {
+                if (exception.error != HomeAssistantError.CONNECTION_FAILED ||
+                    System.nanoTime() >= reconnectDeadline
+                ) {
+                    throw exception
+                }
+                try {
+                    Thread.sleep(RECONNECT_DELAY_MILLIS)
+                } catch (interrupted: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw HomeAssistantException(
+                        HomeAssistantError.INTERRUPTED,
+                        "Home Assistant reconnection was interrupted."
+                    )
+                }
+                continue
+            }
+            return session.use(block)
+        }
     }
 
     fun createCamera(name: String, streamUrl: String, username: String, password: String): String {
@@ -511,7 +558,7 @@ class HomeAssistantClient(
         } catch (e: IOException) {
             throw HomeAssistantException(
                 HomeAssistantError.CONNECTION_FAILED,
-                "Could not reach the Home Assistant REST API.",
+                "Could not reach the Home Assistant REST API (${e.javaClass.simpleName}: ${e.message}).",
                 e
             )
         }
@@ -792,6 +839,11 @@ class HomeAssistantClient(
         const val RECONNECT_WINDOW_SECONDS = 15L
         const val RECONNECT_DELAY_MILLIS = 500L
         const val POLL_INTERVAL_MILLIS = 1000L
+        val DEFAULT_HTTP_CLIENT: OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
+            .build()
     }
 }
 
