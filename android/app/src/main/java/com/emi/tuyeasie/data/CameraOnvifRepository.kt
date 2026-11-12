@@ -267,9 +267,18 @@ class CameraOnvifRepository(private val context: Context) {
                     )
                 )
             )
-            awaitCallback(camera, "ONVIF password read (DP $dp)") { callback -> camera.sdk.getDpList(listOf(dp), callback) }
+            // The camera only reports the password-change result when queried with getDpList; if the first read
+            // arrives while it is still applying the change, it answers blank until the next read.
             try {
-                withTimeout(SDK_TIMEOUT_MS) { result.await() }
+                withTimeout(SDK_TIMEOUT_MS) {
+                    while (!result.isCompleted) {
+                        awaitCallback(camera, "ONVIF password read (DP $dp)") { callback ->
+                            camera.sdk.getDpList(listOf(dp), callback)
+                        }
+                        withTimeoutOrNull(1000) { result.await() }
+                    }
+                    result.await()
+                }
             } catch (e: TimeoutCancellationException) {
                 Log.e(TAG, "DP$dp result timed out")
                 throw CameraOnvifException(stage, "timed out waiting for DP$dp result with res", e)
