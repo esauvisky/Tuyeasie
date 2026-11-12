@@ -16,6 +16,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.xmlpull.v1.XmlPullParser
+import org.xmlpull.v1.XmlPullParserException
 
 class OnvifException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
 
@@ -195,25 +196,32 @@ class OnvifClient(private val http: OkHttpClient = DEFAULT_HTTP) {
     }
 
     private fun parse(xml: String): Node {
+        // IPCAM-31.x firmware omits the closing '>' on </tds:GetServicesResponse before </s:Body>.
+        val repaired = xml.replace(Regex("""(</[A-Za-z0-9_:.-]+)\s*(?=<)"""), "$1>")
         val parser = Xml.newPullParser()
         parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, true)
-        parser.setInput(StringReader(xml))
+        parser.setFeature("http://xmlpull.org/v1/doc/features.html#relaxed", true)
+        parser.setInput(StringReader(repaired))
         val stack = ArrayDeque<Node>()
         var root: Node? = null
-        while (true) {
-            when (parser.next()) {
-                XmlPullParser.START_TAG -> {
-                    val node = Node(
-                        parser.name,
-                        (0 until parser.attributeCount).associate { parser.getAttributeName(it) to parser.getAttributeValue(it) }
-                    )
-                    if (stack.isEmpty()) root = node else stack.last().children.add(node)
-                    stack.addLast(node)
+        try {
+            while (true) {
+                when (parser.next()) {
+                    XmlPullParser.START_TAG -> {
+                        val node = Node(
+                            parser.name,
+                            (0 until parser.attributeCount).associate { parser.getAttributeName(it) to parser.getAttributeValue(it) }
+                        )
+                        if (stack.isEmpty()) root = node else stack.last().children.add(node)
+                        stack.addLast(node)
+                    }
+                    XmlPullParser.TEXT -> if (stack.isNotEmpty()) stack.last().text.append(parser.text)
+                    XmlPullParser.END_TAG -> stack.removeLast()
+                    XmlPullParser.END_DOCUMENT -> return checkNotNull(root) { "empty XML document" }
                 }
-                XmlPullParser.TEXT -> if (stack.isNotEmpty()) stack.last().text.append(parser.text)
-                XmlPullParser.END_TAG -> stack.removeLast()
-                XmlPullParser.END_DOCUMENT -> return checkNotNull(root) { "empty XML document" }
             }
+        } catch (e: XmlPullParserException) {
+            throw OnvifException("Malformed ONVIF XML: ${e.message}", e)
         }
     }
 

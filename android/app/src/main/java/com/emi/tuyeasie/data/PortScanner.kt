@@ -62,7 +62,7 @@ object PortScanner {
         val streams = mutableListOf<DetectedStream>()
         var matched: Credentials? = null
         val paths = listOf(
-            "stream0", "stream1", "Streaming/Channels/1", "Streaming/Channels/2",
+            "stream0", "stream1", "stream_0", "stream_1", "Streaming/Channels/1", "Streaming/Channels/2",
             "live/ch00_0", "live/ch00_1", "11", "12", "h264", "onvif1", ""
         )
         for (port in rtspPorts) {
