@@ -1,8 +1,10 @@
 package com.emi.tuyeasie.hass
 
+import com.alibaba.fastjson.JSON
 import com.emi.tuyeasie.data.ActivatedDevice
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HomeAssistantClientTest {
@@ -101,5 +103,72 @@ class HomeAssistantClientTest {
         assertEquals(HomeAssistantError.UNKNOWN_COMMAND, serverError("unknown_command").error)
         assertEquals(HomeAssistantError.UNAUTHORIZED, serverError("unauthorized").error)
         assertEquals(HomeAssistantError.SERVER_ERROR, serverError("another_error").error)
+    }
+
+    @Test
+    fun constructsOnvifConfigurePayload() {
+        val payload = HomeAssistantProtocol.onvifConfigurePayload("Porch", "192.168.1.30", 8000, "admin", "secret")
+
+        assertEquals(
+            mapOf(
+                "name" to "Porch",
+                "host" to "192.168.1.30",
+                "port" to 8000,
+                "username" to "admin",
+                "password" to "secret"
+            ),
+            payload
+        )
+    }
+
+    @Test
+    fun readsCurrentAddressFromOnvifReconfigureForm() {
+        val form = JSON.parseObject(
+            """
+            {"type":"form","step_id":"reconfigure","errors":{},"data_schema":[
+              {"name":"host","required":true,"type":"string","description":{"suggested_value":"192.168.1.30"}},
+              {"name":"port","required":true,"type":"integer","description":{"suggested_value":8000}},
+              {"name":"username","optional":true,"default":"","type":"string","description":{"suggested_value":"admin"}},
+              {"name":"password","optional":true,"default":"","type":"string"}
+            ]}
+            """.trimIndent()
+        )
+
+        assertEquals("192.168.1.30" to 8000, HomeAssistantProtocol.onvifReconfigureAddress(form))
+    }
+
+    @Test
+    fun mapsOnvifConfigureErrorsAndAbortsToMessagesWithHomeAssistantKeys() {
+        val authFailed = HomeAssistantProtocol.onvifFlowFailure(
+            JSON.parseObject(
+                """{"type":"form","step_id":"configure","errors":{"password":"auth_failed"},""" +
+                    """"description_placeholders":{"error":"Sender not Authorized"}}"""
+            )
+        )
+        assertEquals(HomeAssistantError.SERVER_ERROR, authFailed.error)
+        assertEquals(
+            "Home Assistant could not log in to the ONVIF device: Sender not Authorized (auth_failed).",
+            authFailed.publicMessage
+        )
+
+        val noService = HomeAssistantProtocol.onvifFlowFailure(
+            JSON.parseObject("""{"type":"form","step_id":"configure","errors":{"port":"no_onvif_service"}}""")
+        )
+        assertTrue(noService.publicMessage.endsWith("(no_onvif_service)."))
+
+        val unknownError = HomeAssistantProtocol.onvifFlowFailure(
+            JSON.parseObject("""{"type":"form","step_id":"configure","errors":{"base":"cannot_connect"}}""")
+        )
+        assertEquals("Home Assistant rejected the ONVIF configuration (base: cannot_connect).", unknownError.publicMessage)
+
+        val noH264 = HomeAssistantProtocol.onvifFlowFailure(
+            JSON.parseObject("""{"type":"abort","reason":"no_h264"}""")
+        )
+        assertTrue(noH264.publicMessage.endsWith("(no_h264)."))
+
+        val otherAbort = HomeAssistantProtocol.onvifFlowFailure(
+            JSON.parseObject("""{"type":"abort","reason":"unique_id_mismatch"}""")
+        )
+        assertEquals("Home Assistant aborted the ONVIF setup (unique_id_mismatch).", otherAbort.publicMessage)
     }
 }

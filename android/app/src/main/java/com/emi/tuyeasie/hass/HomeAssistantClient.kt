@@ -354,6 +354,73 @@ class HomeAssistantClient(
             ?: throw invalidResponse("Home Assistant returned no camera entry ID.")
     }
 
+    fun createOnvifEntry(name: String, host: String, port: Int, username: String, password: String): String {
+        if (name.isBlank() || host.isBlank()) {
+            throw HomeAssistantException(
+                HomeAssistantError.INVALID_FORMAT,
+                "ONVIF camera name and host are required."
+            )
+        }
+        // Always run the flow: for a device HA already knows (same MAC), it writes the new address and credentials
+        // onto the existing entry and aborts with already_configured.
+        val entryId = createOnvifFlowEntry(name, host, port, username, password)
+        openVerifiedSession().use { session ->
+            session.callCommand("config_entries/update", mapOf("entry_id" to entryId, "title" to name))
+            awaitEntryLoaded(session, entryId)
+        }
+        return entryId
+    }
+
+    // Entry data is not exposed over the API, but the ONVIF reconfigure form suggests the entry's current host
+    // and port, so each entry's reconfigure flow is opened, read and deleted without changing anything.
+    private fun findOnvifEntryId(host: String, port: Int): String? {
+        val entries = try {
+            JSON.parseArray(httpRequest("GET", "/api/config/config_entries/entry?domain=onvif", null))
+        } catch (e: JSONException) {
+            throw HomeAssistantException(
+                HomeAssistantError.INVALID_RESPONSE,
+                "Home Assistant returned invalid JSON.",
+                e
+            )
+        } ?: throw invalidResponse("Home Assistant returned no ONVIF entry list.")
+        for (index in 0 until entries.size) {
+            val entryId = entries.getJSONObject(index).getString("entry_id")
+                ?: throw invalidResponse("An ONVIF entry has no entry ID.")
+            val form = postFlow("/api/config/config_entries/flow", mapOf("handler" to "onvif", "entry_id" to entryId))
+            val flowId = form.getString("flow_id")
+                ?: throw invalidResponse("Home Assistant returned no ONVIF reconfigure flow ID.")
+            val address = try {
+                requireFlowStep(form, "reconfigure")
+                HomeAssistantProtocol.onvifReconfigureAddress(form)
+            } finally {
+                httpRequest("DELETE", "/api/config/config_entries/flow/$flowId", null)
+            }
+            if (address == host to port) return entryId
+        }
+        return null
+    }
+
+    private fun createOnvifFlowEntry(name: String, host: String, port: Int, username: String, password: String): String {
+        val start = postFlow("/api/config/config_entries/flow", mapOf("handler" to "onvif"))
+        requireFlowStep(start, "user")
+        val flowId = start.getString("flow_id")
+            ?: throw invalidResponse("Home Assistant returned no ONVIF flow ID.")
+        val flowPath = "/api/config/config_entries/flow/$flowId"
+        val form = postFlow(flowPath, mapOf("auto" to false))
+        requireFlowStep(form, "configure")
+        val result = postFlow(flowPath, HomeAssistantProtocol.onvifConfigurePayload(name, host, port, username, password))
+        if (result.getString("type") == "create_entry") {
+            return result.getJSONObject("result")?.getString("entry_id")
+                ?: throw invalidResponse("Home Assistant returned no ONVIF entry ID.")
+        }
+        // The device's MAC or serial already has an entry; the flow moved that entry to this host and port.
+        if (result.getString("type") == "abort" && result.getString("reason") == "already_configured") {
+            return findOnvifEntryId(host, port)
+                ?: throw invalidResponse("Home Assistant reported the ONVIF device as configured, but no entry uses $host:$port.")
+        }
+        throw HomeAssistantProtocol.onvifFlowFailure(result)
+    }
+
     private fun requireFlowStep(response: JSONObject, stepId: String) {
         if (response.getString("type") != "form" || response.getString("step_id") != stepId) {
             throw flowFailure(response)
@@ -457,7 +524,7 @@ class HomeAssistantClient(
         }
         throw HomeAssistantException(
             HomeAssistantError.ENTRY_NOT_LOADED,
-            "Timed out waiting for the generic camera config entry to finish loading."
+            "Timed out waiting for the camera config entry to finish loading."
         )
     }
 
@@ -769,6 +836,69 @@ internal object HomeAssistantProtocol {
 
     fun isSupportedProtocolVersion(value: String): Boolean =
         SUPPORTED_PROTOCOL_VERSION.matches(value)
+
+    fun onvifConfigurePayload(
+        name: String,
+        host: String,
+        port: Int,
+        username: String,
+        password: String
+    ): Map<String, Any?> = linkedMapOf(
+        "name" to name,
+        "host" to host,
+        "port" to port,
+        "username" to username,
+        "password" to password
+    )
+
+    fun onvifReconfigureAddress(form: JSONObject): Pair<String, Int> {
+        val schema = form.getJSONArray("data_schema")
+            ?: throw invalidResponse("The ONVIF reconfigure form has no schema.")
+        val fields = (0 until schema.size).map { schema.getJSONObject(it) }
+        fun suggested(name: String): Any = fields.single { it.getString("name") == name }
+            .getJSONObject("description")?.get("suggested_value")
+            ?: throw invalidResponse("The ONVIF reconfigure form has no current $name.")
+        return suggested("host") as String to suggested("port") as Int
+    }
+
+    // Errors and aborts produced by the ONVIF configure step (homeassistant/components/onvif/config_flow.py).
+    fun onvifFlowFailure(response: JSONObject): HomeAssistantException {
+        val message = when (val type = response.getString("type")) {
+            "form" -> {
+                val errors = response.getJSONObject("errors")
+                if (errors == null || errors.isEmpty()) {
+                    "Home Assistant showed an unexpected ONVIF setup step (${response.getString("step_id")})."
+                } else {
+                    errors.entries.joinToString(" ") { (field, key) ->
+                        when (key) {
+                            "auth_failed" ->
+                                "Home Assistant could not log in to the ONVIF device: ${onvifErrorDetail(response, key)} (auth_failed)."
+                            "onvif_error" ->
+                                "Home Assistant could not set up the ONVIF device: ${onvifErrorDetail(response, key)} (onvif_error)."
+                            "no_onvif_service" ->
+                                "No ONVIF service answered on that host and port. Check the port number (no_onvif_service)."
+                            else ->
+                                "Home Assistant rejected the ONVIF configuration ($field: $key)."
+                        }
+                    }
+                }
+            }
+            "abort" -> when (val reason = response.getString("reason")) {
+                "no_h264" ->
+                    "The ONVIF device offers no H.264 stream. Check its profile configuration (no_h264)."
+                "no_mac" ->
+                    "Home Assistant could not read a MAC address or serial number from the ONVIF device (no_mac)."
+                else ->
+                    "Home Assistant aborted the ONVIF setup ($reason)."
+            }
+            else -> "Home Assistant returned an unexpected ONVIF setup result ($type)."
+        }
+        return HomeAssistantException(HomeAssistantError.SERVER_ERROR, message)
+    }
+
+    private fun onvifErrorDetail(response: JSONObject, key: Any?): String =
+        response.getJSONObject("description_placeholders")?.getString("error")
+            ?: throw invalidResponse("Home Assistant returned the ONVIF $key error without its detail.")
 
     private val SUPPORTED_PROTOCOL_VERSION = Regex("3\\.\\d+")
 }
