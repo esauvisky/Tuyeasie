@@ -32,11 +32,17 @@ data class TuyaManagedDevice(
 class TuyaSdkException(val stage: String, val code: String, message: String) :
     RuntimeException("$stage failed ($code): $message")
 
-fun deviceCapabilities(bean: com.thingclips.smart.sdk.bean.DeviceBean): DeviceCapabilities = DeviceCapabilities(
-    dataPoints = bean.schemaMap.values.associate { it.code to it.id },
-    mac = bean.mac,
-    tuyaLan = bean.isHasLanCommunication()
-)
+// Device beans from activation and home detail carry no schemaMap; the SDK's data cache holds the schema.
+fun deviceCapabilities(bean: com.thingclips.smart.sdk.bean.DeviceBean): DeviceCapabilities {
+    val schema = checkNotNull(ThingHomeSdk.getDataInstance().getSchema(bean.devId)) {
+        "Tuya SDK has no schema for ${bean.devId}"
+    }
+    return DeviceCapabilities(
+        dataPoints = schema.values.associate { it.code to it.id },
+        mac = bean.mac,
+        tuyaLan = bean.isHasLanCommunication()
+    )
+}
 
 class TuyaAccountRepository(context: Context, private val store: SecureSettingsStore) {
     private val appContext = context.applicationContext

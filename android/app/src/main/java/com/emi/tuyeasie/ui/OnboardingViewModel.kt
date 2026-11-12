@@ -865,11 +865,9 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         importDevice(pending.device)
     }
 
-    fun openDeviceSetup(device: ActivatedDevice) {
+    fun openDeviceSetup(device: ActivatedDevice, capabilities: DeviceCapabilities) {
         check(!current.busy) { "Onboarding is busy; cannot open the device screen" }
-        val capabilities = checkNotNull(store.loadCapabilities(device.deviceId)) {
-            "No capabilities saved for ${device.deviceId}"
-        }
+        store.saveCapabilities(device.deviceId, capabilities)
         update {
             copy(
                 deviceScreenOpen = true,
