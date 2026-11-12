@@ -1555,8 +1555,10 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                     "${target.rtspBase}/$streamName"
                 } else directUrl
                 val entryId = withContext(Dispatchers.IO) {
-                    if (target != null) homeAssistantClient.createCamera(title, source, "", "")
-                    else homeAssistantClient.createCamera(title, source, record.username, record.password)
+                    (if (target != null) homeAssistantClient.createCamera(title, source, "", "")
+                    else homeAssistantClient.createCamera(title, source, record.username, record.password)).also { createdId ->
+                        homeAssistantClient.enableCameraEntitiesForDevice(device.deviceId, createdId)
+                    }
                 }
                 return entryId to null
             } catch (exception: HomeAssistantException) {
@@ -1580,7 +1582,9 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                         if (serviceUrl.port == -1) 80 else serviceUrl.port,
                         record.username,
                         record.password
-                    )
+                    ).also { createdId ->
+                        homeAssistantClient.enableCameraEntitiesForDevice(device.deviceId, createdId)
+                    }
                 }
                 if (generation != importGeneration.get()) return
                 val registered = record.copy(

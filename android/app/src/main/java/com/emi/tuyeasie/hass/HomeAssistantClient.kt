@@ -286,6 +286,7 @@ class HomeAssistantClient(
             val entryId = result.getString("entry_id")
                 ?: throw invalidResponse("Home Assistant returned no entry ID for stream configuration.")
             awaitEntryLoaded(session, entryId)
+            enableCameraEntities(session, setOf(entryId))
             return entryId
         }
     }
@@ -354,6 +355,43 @@ class HomeAssistantClient(
         }
     }
 
+    /**
+     * Enables any `camera.*` entities on [entryIds] (and on the device's Tuya Local entry when [deviceId] is given)
+     * that the integration created disabled by default.
+     */
+    fun enableCameraEntitiesForDevice(deviceId: String?, vararg entryIds: String) {
+        withVerifiedSession { session ->
+            val targetEntryIds = entryIds.filter { it.isNotBlank() }.toMutableSet()
+            if (!deviceId.isNullOrBlank()) {
+                findTuyaLocalEntryId(session, deviceId)?.let { targetEntryIds += it }
+            }
+            if (targetEntryIds.isNotEmpty()) {
+                enableCameraEntities(session, targetEntryIds)
+            }
+        }
+    }
+
+    private fun enableCameraEntities(session: WebSocketSession, entryIds: Set<String>) {
+        val registry = session.callCommand("config/entity_registry/list").getJSONArray("result")
+            ?: throw invalidResponse("Home Assistant returned no entity registry.")
+        val touchedEntries = mutableSetOf<String>()
+        for (index in 0 until registry.size) {
+            val entity = registry.getJSONObject(index)
+            val configEntryId = entity.getString("config_entry_id") ?: continue
+            if (configEntryId !in entryIds) continue
+            val disabledBy = entity.getString("disabled_by") ?: continue
+            val entityId = checkNotNull(entity.getString("entity_id")) { "An entity registry entry has no entity_id" }
+            if (entityId.startsWith("camera.") && disabledBy == "integration") {
+                session.callCommand(
+                    "config/entity_registry/update",
+                    mapOf("entity_id" to entityId, "disabled_by" to null)
+                )
+                touchedEntries += configEntryId
+            }
+        }
+        touchedEntries.forEach { awaitEntryLoaded(session, it) }
+    }
+
     fun createCamera(name: String, streamUrl: String, username: String, password: String): String {
         if (name.isBlank() || streamUrl.isBlank()) {
             throw HomeAssistantException(
@@ -365,6 +403,7 @@ class HomeAssistantClient(
         openVerifiedSession().use { session ->
             session.callCommand("config_entries/update", mapOf("entry_id" to entryId, "title" to name))
             awaitEntryLoaded(session, entryId)
+            enableCameraEntities(session, setOf(entryId))
         }
         return entryId
     }
@@ -431,6 +470,7 @@ class HomeAssistantClient(
         openVerifiedSession().use { session ->
             session.callCommand("config_entries/update", mapOf("entry_id" to entryId, "title" to name))
             awaitEntryLoaded(session, entryId)
+            enableCameraEntities(session, setOf(entryId))
         }
         return entryId
     }
