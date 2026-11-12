@@ -37,6 +37,32 @@ data class DetectedStream(
     val source: StreamSource
 )
 
+data class Credentials(val username: String, val password: String) {
+    override fun toString() = "Credentials(username=$username, password=[redacted])"
+
+    companion object {
+        val DEFAULT = Credentials("admin", "admin")
+        val DEFAULT_PASSWORDS = listOf(
+            "admin",
+            "admin123",
+            "123456",
+            "12345678",
+            "admin1234",
+            "888888",
+            "12345",
+            "password"
+        )
+        val DEFAULTS = DEFAULT_PASSWORDS.map { Credentials("admin", it) } + listOf(
+            Credentials("admin", ""),
+            Credentials("root", "root"),
+            Credentials("root", "123456")
+        )
+
+        fun candidates(preferred: Credentials? = null): List<Credentials> =
+            (listOfNotNull(preferred?.takeIf { it.username.isNotEmpty() || it.password.isNotEmpty() }) + DEFAULTS).distinct()
+    }
+}
+
 data class OnvifInfo(
     val serviceUrl: String,
     val manufacturer: String?,
@@ -44,7 +70,8 @@ data class OnvifInfo(
     val firmware: String?,
     val mac: String?,
     val authRequired: Boolean,
-    val streams: List<DetectedStream>
+    val streams: List<DetectedStream>,
+    val credentials: Credentials? = null
 )
 
 enum class AddressSource(val label: String) {

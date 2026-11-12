@@ -19,7 +19,7 @@ object RtspClient {
     private const val TIMEOUT_MS = 10_000
     private const val RTSP_PREFIX = "RTSP/"
 
-    data class StreamInfo(val codec: String?, val resolution: String?)
+    data class StreamInfo(val codec: String?, val resolution: String?, val credentials: Credentials? = null)
 
     class RtspResponse(
         val status: Int,
@@ -28,27 +28,35 @@ object RtspClient {
         val body: String
     )
 
-    fun describe(url: String, username: String, password: String?): StreamInfo {
+    fun describe(url: String, credentials: List<Credentials>): StreamInfo {
         fun fail(reason: String): Nothing = throw IllegalStateException(reason)
 
         var response = rtspDescribe(url, null)
+        var matched: Credentials? = null
         if (response.status == 401) {
-            if (password == null) throw RtspStatusException(401, "RTSP credentials are required")
-            val challenges = response.headers["www-authenticate"].orEmpty()
-            val digest = challenges.firstOrNull { it.startsWith("Digest", ignoreCase = true) }
-            val basic = challenges.firstOrNull { it.startsWith("Basic", ignoreCase = true) }
-            val authorization = when {
-                digest != null -> digestAuthorization(digest, url, username, password)
-                basic != null -> "Basic " + Base64.getEncoder()
-                    .encodeToString("$username:$password".toByteArray())
-                else -> fail("401 without a Basic or Digest challenge")
+            if (credentials.isEmpty()) throw RtspStatusException(401, "RTSP credentials are required")
+            for (candidate in credentials) {
+                val challenges = response.headers["www-authenticate"].orEmpty()
+                val digest = challenges.firstOrNull { it.startsWith("Digest", ignoreCase = true) }
+                val basic = challenges.firstOrNull { it.startsWith("Basic", ignoreCase = true) }
+                val authorization = when {
+                    digest != null -> digestAuthorization(digest, url, candidate.username, candidate.password)
+                    basic != null -> "Basic " + Base64.getEncoder()
+                        .encodeToString("${candidate.username}:${candidate.password}".toByteArray())
+                    else -> fail("401 without a Basic or Digest challenge")
+                }
+                response = rtspDescribe(url, authorization)
+                if (response.status != 401) {
+                    matched = candidate
+                    break
+                }
             }
-            response = rtspDescribe(url, authorization)
         }
         if (response.status != 200) {
             throw RtspStatusException(response.status, "DESCRIBE returned ${response.status} ${response.reason}")
         }
-        return parseSdp(response.body) ?: fail("SDP has no video media section")
+        val info = parseSdp(response.body) ?: fail("SDP has no video media section")
+        return info.copy(credentials = matched)
     }
 
     /** Probe answer: null means the peer closed, stayed silent or replied with something that is not RTSP. */

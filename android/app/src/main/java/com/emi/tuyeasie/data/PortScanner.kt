@@ -54,23 +54,33 @@ object PortScanner {
             }
         }
 
-    fun guessRtspStreams(ip: String, rtspPorts: List<Int>, username: String, password: String?): List<DetectedStream> {
+    fun guessRtspStreams(
+        ip: String,
+        rtspPorts: List<Int>,
+        credentials: List<Credentials>
+    ): Pair<List<DetectedStream>, Credentials?> {
         val streams = mutableListOf<DetectedStream>()
+        var matched: Credentials? = null
+        val paths = listOf(
+            "stream0", "stream1", "Streaming/Channels/1", "Streaming/Channels/2",
+            "live/ch00_0", "live/ch00_1", "11", "12", "h264", "onvif1", ""
+        )
         for (port in rtspPorts) {
-            for (path in listOf("stream0", "stream1", "live/ch00_0", "live/ch00_1", "11", "12", "h264", "onvif1", "")) {
+            for (path in paths) {
                 val url = "rtsp://$ip:$port/$path"
                 // A refused, reset or non-200 DESCRIBE is the expected answer for a path the camera does not serve.
                 val info = try {
-                    RtspClient.describe(url, username, password)
+                    RtspClient.describe(url, (listOfNotNull(matched) + credentials).distinct())
                 } catch (e: RtspStatusException) {
                     continue
                 } catch (e: IOException) {
                     continue
                 }
+                if (matched == null && info.credentials != null) matched = info.credentials
                 streams.add(DetectedStream(path.ifEmpty { "root" }, url, info.codec, info.resolution, StreamSource.PORT_SCAN))
             }
         }
-        return streams
+        return streams to matched
     }
 
     private class Known(val label: String, val description: String)
@@ -106,6 +116,7 @@ object PortScanner {
         8899 to Known("ONVIF", "ONVIF on some cameras"),
         9000 to Known("Vendor", "Hikvision SDK/various"),
         9527 to Known("Vendor", "Debug/control console on some cameras"),
+        10000 to Known("ONVIF/HTTP", "ONVIF on some cameras"),
         10554 to Known("RTSP", "Alternate video streaming port"),
         34567 to Known("XMEye", "XMEye/NetSurveillance (DVR/camera protocol)"),
         37777 to Known("Dahua", "Dahua camera/NVR control protocol"),

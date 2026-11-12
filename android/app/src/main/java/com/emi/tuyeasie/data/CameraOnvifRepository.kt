@@ -8,6 +8,7 @@ import com.thingclips.smart.sdk.api.IDevListener
 import com.thingclips.smart.sdk.api.IResultCallback
 import com.thingclips.smart.sdk.api.IThingDevice
 import com.emi.tuyeasie.hass.HomeAssistantProtocol
+import java.io.IOException
 import java.security.SecureRandom
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -27,14 +28,10 @@ class CameraOnvifRepository(private val context: Context) {
     suspend fun configure(
         device: ActivatedDevice,
         existingPassword: String?,
-        targetPassword: String,
+        targetPassword: String?,
         onProgress: (String) -> Unit,
         savePassword: suspend (String) -> Unit
     ): OnvifRecord {
-        val oldPassword = existingPassword ?: DEFAULT_PASSWORD
-        // The camera refuses a "change" to the password it already has (onvif_change_pwd errcode 2), and only reports
-        // ONVIF as ready once a change happened, so reaching the factory default takes a two-step rotation.
-        val password = if (oldPassword == targetPassword) generatePassword() else targetPassword
         val camera = Camera(
             ThingHomeSdk.newDeviceInstance(device.deviceId),
             device.deviceId,
@@ -42,13 +39,31 @@ class CameraOnvifRepository(private val context: Context) {
             onProgress
         )
         val dps = camera.dps
-        val onvif: OnvifEndpoint
+        val attemptedPasswords = mutableSetOf<String>()
+        val verified: VerifiedOnvif
         try {
-            // The camera rejects a password change once ONVIF is already on, so set the password first.
+            awaitCallback(camera, "ONVIF initial state read") { callback ->
+                camera.sdk.getDpList(listOf(dps.switch, dps.passwordChanged, dps.ipAddress), callback)
+            }
+            val initialValues = deviceBean(camera).dps
+            val wasSwitchOn = initialValues[dps.switch] == true
+            val wasPasswordChanged = initialValues[dps.passwordChanged] == true
+            // Some camera firmware rejects a password change while ONVIF is switched on, so turn it off first.
+            if (wasSwitchOn) {
+                onProgress("Turning ONVIF off before setting the password…")
+                publish(camera, "ONVIF switch off (DP ${dps.switch})", """{"${dps.switch}":false}""")
+                awaitDp(camera, "ONVIF switch off confirmation (DP ${dps.switch})", dps.switch, false)
+            }
             onProgress("Setting the ONVIF password…")
-            changePassword(camera, oldPassword, password, savePassword)
-            if (password != targetPassword) changePassword(camera, password, targetPassword, savePassword)
-            Log.d(TAG, "onvif_change_pwd confirmed res=ok, turning ONVIF on")
+            val activePassword = ensurePassword(
+                camera = camera,
+                existingPassword = existingPassword,
+                targetPassword = targetPassword,
+                wasPasswordChanged = wasPasswordChanged,
+                attemptedPasswords = attemptedPasswords,
+                savePassword = savePassword
+            )
+            Log.d(TAG, "onvif_change_pwd confirmed, turning ONVIF on")
             onProgress("Turning ONVIF on…")
             publish(camera, "ONVIF switch (DP ${dps.switch})", """{"${dps.switch}":true}""")
             awaitDp(camera, "ONVIF switch on confirmation (DP ${dps.switch})", dps.switch, true)
@@ -71,27 +86,27 @@ class CameraOnvifRepository(private val context: Context) {
             publish(camera, "ONVIF IP mode restore (DP ${dps.ipType})", """{"${dps.ipType}":"$mode"}""")
             awaitDp(camera, "ONVIF IP mode restore confirmation (DP ${dps.ipType})", dps.ipType, mode)
             delay(1500)
-            onProgress("Waiting for the camera to report its ONVIF address…")
-            onvif = verifyState(camera)
+            onProgress("Waiting for the camera's ONVIF and RTSP streams to come online…")
+            verified = verifyState(camera, activePassword)
         } catch (e: CameraOnvifException) {
             val message = checkNotNull(e.message)
-            val sanitized = message.replace(password, "[redacted]").replace(targetPassword, "[redacted]")
+            var sanitized = message
+            (attemptedPasswords + listOfNotNull(existingPassword, targetPassword))
+                .filter { it.isNotEmpty() }
+                .forEach { secret -> sanitized = sanitized.replace(secret, "[redacted]") }
             if (sanitized == message) throw e
             // The cause is omitted: it carries the unredacted message and would leak the new password into crash logs.
             throw CameraOnvifException(e.stage, sanitized.removePrefix("${e.stage}: "))
         } finally {
             camera.sdk.onDestroy()
         }
-        val address = onvif.address
-        onProgress("Reading the camera's streams over ONVIF at $address…")
-        val info = withContext(Dispatchers.IO) { readStreams(onvif.serviceUrl, targetPassword) }
-        val main = info.streams[0]
-        val sub = info.streams.getOrNull(1)
+        val main = verified.info.streams[0]
+        val sub = verified.info.streams.getOrNull(1)
         return OnvifRecord(
             deviceId = device.deviceId,
-            address = address,
-            username = DEFAULT_USERNAME,
-            password = targetPassword,
+            address = verified.address,
+            username = verified.credentials.username,
+            password = verified.credentials.password,
             mainUrl = main.url,
             subUrl = sub?.url,
             mainCodec = main.codec,
@@ -102,20 +117,93 @@ class CameraOnvifRepository(private val context: Context) {
         )
     }
 
-    // Blocking.
-    private fun readStreams(serviceUrl: String, password: String): OnvifInfo {
-        val stage = "ONVIF streams"
-        val info = try {
-            OnvifClient().probe(serviceUrl, DEFAULT_USERNAME, password)
-        } catch (e: OnvifException) {
-            throw CameraOnvifException(stage, "${e.message} ($serviceUrl)", e)
-        } catch (e: java.io.IOException) {
-            throw CameraOnvifException(stage, "${e.javaClass.simpleName}: ${e.message} ($serviceUrl)", e)
-        } catch (e: IllegalStateException) {
-            throw CameraOnvifException(stage, "${e.message} ($serviceUrl)", e)
+    /**
+     * Sets the camera's ONVIF password and returns the password that is now active on the camera.
+     * When [targetPassword] is null, tries the common default passwords in order (keeping `"admin"` when the camera
+     * allows it, or the first fallback default such as `"admin123"` when the firmware forbids `"admin"`).
+     */
+    private suspend fun ensurePassword(
+        camera: Camera,
+        existingPassword: String?,
+        targetPassword: String?,
+        wasPasswordChanged: Boolean,
+        attemptedPasswords: MutableSet<String>,
+        savePassword: suspend (String) -> Unit
+    ): String {
+        val oldCandidates = (listOfNotNull(existingPassword) + Credentials.DEFAULT_PASSWORDS).distinct()
+        val fallbacks = listOf("admin123", "123456", "12345678", "admin1234")
+        if (targetPassword != null) {
+            for (old in oldCandidates) {
+                if (old == targetPassword) {
+                    val hop = if (targetPassword == "admin123") generatePassword() else "admin123"
+                    if (tryChangePassword(camera, old, hop, attemptedPasswords, savePassword)) {
+                        if (tryChangePassword(camera, hop, targetPassword, attemptedPasswords, savePassword)) {
+                            return targetPassword
+                        }
+                        throw CameraOnvifException(
+                            "ONVIF password",
+                            "the camera rejected the requested password (kept temporary password)"
+                        )
+                    }
+                } else if (tryChangePassword(camera, old, targetPassword, attemptedPasswords, savePassword)) {
+                    return targetPassword
+                }
+            }
+            throw CameraOnvifException("ONVIF password", "the camera rejected the password change")
         }
-        if (info.streams.isEmpty()) throw CameraOnvifException(stage, "the camera reported no stream profiles ($serviceUrl)")
-        return info
+
+        for (old in oldCandidates) {
+            if (old == DEFAULT_PASSWORD) {
+                for (hop in fallbacks + listOf(generatePassword())) {
+                    if (tryChangePassword(camera, old, hop, attemptedPasswords, savePassword)) {
+                        // The camera accepted `hop` (so onvif_pw_changed is now true). Try rotating back to `admin`;
+                        // if this model forbids `admin` as a new password, keep `hop`.
+                        return if (tryChangePassword(camera, hop, DEFAULT_PASSWORD, attemptedPasswords, savePassword)) {
+                            DEFAULT_PASSWORD
+                        } else {
+                            hop
+                        }
+                    }
+                }
+            } else {
+                if (tryChangePassword(camera, old, DEFAULT_PASSWORD, attemptedPasswords, savePassword)) {
+                    return DEFAULT_PASSWORD
+                }
+                for (candidate in fallbacks + listOf(generatePassword())) {
+                    if (candidate == old) {
+                        if (!wasPasswordChanged) continue
+                        val verifyHop = if (old == "admin123") "12345678" else "admin123"
+                        if (tryChangePassword(camera, old, verifyHop, attemptedPasswords, savePassword)) {
+                            return if (tryChangePassword(camera, verifyHop, old, attemptedPasswords, savePassword)) {
+                                old
+                            } else {
+                                verifyHop
+                            }
+                        }
+                    } else if (tryChangePassword(camera, old, candidate, attemptedPasswords, savePassword)) {
+                        return candidate
+                    }
+                }
+            }
+        }
+        throw CameraOnvifException("ONVIF password", "the camera rejected all default password combinations")
+    }
+
+    private suspend fun tryChangePassword(
+        camera: Camera,
+        oldPassword: String,
+        password: String,
+        attemptedPasswords: MutableSet<String>,
+        savePassword: suspend (String) -> Unit
+    ): Boolean {
+        attemptedPasswords += oldPassword
+        attemptedPasswords += password
+        return try {
+            changePassword(camera, oldPassword, password, savePassword)
+            true
+        } catch (e: CameraOnvifException) {
+            if (e.message?.contains("res=failed") == true) false else throw e
+        }
     }
 
     private suspend fun changePassword(
@@ -294,19 +382,19 @@ class CameraOnvifRepository(private val context: Context) {
         } ?: throw CameraOnvifException(stage, "timed out waiting for $dp=$expected; last seen $dp=$last")
     }
 
-    private class OnvifEndpoint(val address: String, val serviceUrl: String)
+    private class VerifiedOnvif(val address: String, val info: OnvifInfo, val credentials: Credentials)
 
     // getDpList refreshes the SDK's cached DPs but fires no update for unchanged values, so read the cache.
-    // The IP-mode cycle can move the camera to a new DHCP address, so onvif_ip_addr counts only once that address
-    // answers ONVIF discovery. Its ONVIF and RTSP ports differ between models (5000/8554, 10000/554), so the
-    // discovery answer is also what says where the ONVIF service is.
-    private suspend fun verifyState(camera: Camera): OnvifEndpoint {
+    // After the IP-mode cycle the camera takes several seconds to bring its ONVIF and RTSP daemons up, so keep
+    // polling until ONVIF discovery and the stream probe both succeed.
+    private suspend fun verifyState(camera: Camera, password: String): VerifiedOnvif {
         val stage = "ONVIF state verification"
         val dps = camera.dps
+        val credentials = Credentials.candidates(Credentials(DEFAULT_USERNAME, password))
         var last = "nothing read yet"
         Log.d(TAG, "verify start")
-        val endpoint = withTimeoutOrNull(STATE_TIMEOUT_MS) {
-            var found: OnvifEndpoint? = null
+        val verified = withTimeoutOrNull(STATE_TIMEOUT_MS) {
+            var found: VerifiedOnvif? = null
             while (found == null) {
                 awaitCallback(camera, stage) { callback ->
                     camera.sdk.getDpList(listOf(dps.switch, dps.passwordChanged, dps.ipAddress), callback)
@@ -315,26 +403,51 @@ class CameraOnvifRepository(private val context: Context) {
                 val switch = values[dps.switch]
                 val passwordChanged = values[dps.passwordChanged]
                 val ip = values[dps.ipAddress] as? String
-                val serviceUrl = if (ip != null && HomeAssistantProtocol.isRfc1918Address(ip)) {
-                    withContext(Dispatchers.IO) {
-                        OnvifDiscovery.discover(context).firstOrNull { it.ip == ip }?.serviceUrls?.first()
+                if (switch == true && passwordChanged == true && ip != null && HomeAssistantProtocol.isRfc1918Address(ip)) {
+                    val probeResult = withContext(Dispatchers.IO) {
+                        val discovered = OnvifDiscovery.discover(context)
+                            .filter { it.ip == ip }
+                            .flatMap { it.serviceUrls }
+                            .distinct()
+                        if (discovered.isEmpty()) {
+                            null to "ONVIF discovery not answered yet"
+                        } else {
+                            val serviceUrl = discovered.first()
+                            try {
+                                val info = OnvifClient().probe(serviceUrl, credentials)
+                                if (info.streams.isEmpty()) {
+                                    null to "no stream profiles yet ($serviceUrl)"
+                                } else {
+                                    val activeCreds = info.credentials ?: Credentials(DEFAULT_USERNAME, password)
+                                    VerifiedOnvif(ip, info, activeCreds) to "ready at $serviceUrl"
+                                }
+                            } catch (e: OnvifException) {
+                                null to "ONVIF starting (${e.message})"
+                            } catch (e: IOException) {
+                                null to "streams starting (${e.javaClass.simpleName}: ${e.message})"
+                            } catch (e: IllegalStateException) {
+                                null to "streams starting (${e.message})"
+                            }
+                        }
                     }
-                } else null
-                last = "${dps.switch}=$switch, ${dps.passwordChanged}=$passwordChanged, ${dps.ipAddress}=$ip, " +
-                    "ONVIF service=$serviceUrl"
-                Log.d(TAG, "verify read: $last")
-                if (switch == true && passwordChanged == true && serviceUrl != null) {
-                    found = OnvifEndpoint(checkNotNull(ip), serviceUrl)
+                    last = "${dps.switch}=$switch, ${dps.passwordChanged}=$passwordChanged, ${dps.ipAddress}=$ip, " +
+                        probeResult.second
+                    Log.d(TAG, "verify read: $last")
+                    found = probeResult.first
                 } else {
+                    last = "${dps.switch}=$switch, ${dps.passwordChanged}=$passwordChanged, ${dps.ipAddress}=$ip"
+                    Log.d(TAG, "verify read: $last")
+                }
+                if (found == null) {
                     if (switch == false) publish(camera, "ONVIF switch (DP ${dps.switch})", """{"${dps.switch}":true}""")
                     delay(2000)
                 }
             }
             found
         }
-        return endpoint ?: throw CameraOnvifException(
+        return verified ?: throw CameraOnvifException(
             stage,
-            "timed out waiting for ${dps.switch}=true, ${dps.passwordChanged}=true and an ONVIF discovery answer from " +
+            "timed out waiting for ${dps.switch}=true, ${dps.passwordChanged}=true and live ONVIF/RTSP streams on " +
                 "the private IPv4 in ${dps.ipAddress}; last seen: $last"
         )
     }

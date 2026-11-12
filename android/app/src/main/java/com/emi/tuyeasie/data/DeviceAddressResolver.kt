@@ -13,8 +13,7 @@ class DeviceAddressResolver(private val context: Context) {
         deviceId: String,
         capabilities: DeviceCapabilities,
         onvifRecord: OnvifRecord?,
-        username: String,
-        password: String
+        credentials: List<Credentials>
     ): DeviceAddress {
         // A verified record's address came from the camera's own ONVIF address data point and answered ONVIF discovery.
         if (capabilities.tuyaOnvif && onvifRecord != null && onvifRecord.verified) {
@@ -34,7 +33,7 @@ class DeviceAddressResolver(private val context: Context) {
         for (candidate in candidates) {
             for (url in candidate.serviceUrls) {
                 val candidateMac = try {
-                    OnvifClient().macAddress(url, username, password)
+                    OnvifClient().macAddress(url, credentials)
                 } catch (e: OnvifException) {
                     // Other ONVIF devices on the network may refuse this device's credentials.
                     continue

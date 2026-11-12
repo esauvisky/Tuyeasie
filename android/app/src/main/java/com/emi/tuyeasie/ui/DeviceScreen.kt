@@ -365,7 +365,7 @@ private fun AdvancedCard(state: OnboardingUiState, viewModel: OnboardingViewMode
     val clipboard = remember { context.getSystemService(ClipboardManager::class.java) }
     HaCard(title = null) {
         Disclosure("Advanced") {
-            if (record != null) {
+            if (record != null && record.password.isNotEmpty()) {
                 SecretField("ONVIF password (user ${record.username})", record.password, state.showOnvifPassword, viewModel::toggleOnvifPasswordVisibility) {
                     clipboard.setPrimaryClip(sensitiveClip("ONVIF password", record.password))
                 }
@@ -386,7 +386,7 @@ private fun AdvancedCard(state: OnboardingUiState, viewModel: OnboardingViewMode
                     )
                 }
             } else {
-                var username by remember { mutableStateOf(record?.username ?: CameraOnvifRepository.DEFAULT_USERNAME) }
+                var username by remember { mutableStateOf(record?.username?.ifEmpty { null } ?: CameraOnvifRepository.DEFAULT_USERNAME) }
                 var password by remember { mutableStateOf("") }
                 Text(
                     "The login this device's ONVIF and RTSP accept. This only tells the app; the device is not changed.",

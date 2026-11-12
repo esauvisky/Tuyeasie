@@ -10,6 +10,7 @@ import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 import java.util.Base64
+import java.util.concurrent.TimeUnit
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -18,35 +19,40 @@ import org.xmlpull.v1.XmlPullParser
 
 class OnvifException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
 
-class OnvifClient(private val http: OkHttpClient = OkHttpClient()) {
+class OnvifClient(private val http: OkHttpClient = DEFAULT_HTTP) {
     private var authRequired = false
+    private var matchedCredentials: Credentials? = null
     private var clockOffsetMs = 0L
 
-    fun probe(serviceUrl: String, username: String, password: String?): OnvifInfo {
+    fun probe(serviceUrl: String, credentials: List<Credentials>): OnvifInfo {
         readClockOffset(serviceUrl)
         val info = call(
-            "GetDeviceInformation", serviceUrl, username, password,
+            "GetDeviceInformation", serviceUrl, credentials,
             """<tds:GetDeviceInformation xmlns:tds="$DEVICE_NS"/>"""
         )
-        val mac = macAddress(serviceUrl, username, password)
-        val mediaUrl = mediaServiceUrl(serviceUrl, username, password)
+        val mac = macAddress(serviceUrl, credentials)
+        val mediaUrl = mediaServiceUrl(serviceUrl, credentials)
         val profiles = call(
-            "GetProfiles", mediaUrl, username, password,
+            "GetProfiles", mediaUrl, credentials,
             """<trt:GetProfiles xmlns:trt="$MEDIA_NS"/>"""
         ).findAll("Profiles")
+        val rtspCredentials = (listOfNotNull(matchedCredentials) + credentials).distinct()
         val streams = profiles.map { profile ->
             val token = checkNotNull(profile.attributes["token"]) { "GetProfiles returned a profile without a token" }
             val name = checkNotNull(profile.child("Name")) { "GetProfiles profile $token has no Name" }.value
             val uri = checkNotNull(
                 call(
-                    "GetStreamUri", mediaUrl, username, password,
+                    "GetStreamUri", mediaUrl, credentials,
                     """<trt:GetStreamUri xmlns:trt="$MEDIA_NS" xmlns:tt="$SCHEMA_NS">""" +
                         """<trt:StreamSetup><tt:Stream>RTP-Unicast</tt:Stream>""" +
                         """<tt:Transport><tt:Protocol>RTSP</tt:Protocol></tt:Transport></trt:StreamSetup>""" +
                         """<trt:ProfileToken>$token</trt:ProfileToken></trt:GetStreamUri>"""
                 ).find("Uri")
             ) { "GetStreamUri returned no Uri for profile $token" }.value
-            val stream = RtspClient.describe(uri, username, password)
+            val stream = RtspClient.describe(uri, rtspCredentials)
+            if (matchedCredentials == null && stream.credentials != null) {
+                matchedCredentials = stream.credentials
+            }
             DetectedStream(name, uri, stream.codec, stream.resolution, StreamSource.ONVIF)
         }
         return OnvifInfo(
@@ -56,13 +62,14 @@ class OnvifClient(private val http: OkHttpClient = OkHttpClient()) {
             firmware = info.find("FirmwareVersion")?.value,
             mac = mac,
             authRequired = authRequired,
-            streams = streams
+            streams = streams,
+            credentials = matchedCredentials
         )
     }
 
-    fun macAddress(serviceUrl: String, username: String, password: String?): String {
+    fun macAddress(serviceUrl: String, credentials: List<Credentials>): String {
         val interfaces = call(
-            "GetNetworkInterfaces", serviceUrl, username, password,
+            "GetNetworkInterfaces", serviceUrl, credentials,
             """<tds:GetNetworkInterfaces xmlns:tds="$DEVICE_NS"/>"""
         )
         val raw = checkNotNull(interfaces.find("Info")?.child("HwAddress")) {
@@ -95,9 +102,9 @@ class OnvifClient(private val http: OkHttpClient = OkHttpClient()) {
         clockOffsetMs = deviceTime - System.currentTimeMillis()
     }
 
-    private fun mediaServiceUrl(serviceUrl: String, username: String, password: String?): String {
+    private fun mediaServiceUrl(serviceUrl: String, credentials: List<Credentials>): String {
         val services = authenticated(
-            "GetServices", serviceUrl, username, password,
+            "GetServices", serviceUrl, credentials,
             """<tds:GetServices xmlns:tds="$DEVICE_NS"><tds:IncludeCapability>false</tds:IncludeCapability></tds:GetServices>"""
         )
         val fault = services.fault
@@ -108,7 +115,7 @@ class OnvifClient(private val http: OkHttpClient = OkHttpClient()) {
         // GetCapabilities is the protocol-defined alternative on firmware without GetServices.
         if (!fault.contains("ActionNotSupported")) throw OnvifException("GetServices at $serviceUrl failed: $fault")
         val capabilities = call(
-            "GetCapabilities", serviceUrl, username, password,
+            "GetCapabilities", serviceUrl, credentials,
             """<tds:GetCapabilities xmlns:tds="$DEVICE_NS"><tds:Category>Media</tds:Category></tds:GetCapabilities>"""
         )
         return checkNotNull(capabilities.find("Media")?.child("XAddr")) {
@@ -116,23 +123,40 @@ class OnvifClient(private val http: OkHttpClient = OkHttpClient()) {
         }.value
     }
 
-    private fun call(action: String, url: String, username: String, password: String?, bodyXml: String): Node {
-        val response = authenticated(action, url, username, password, bodyXml)
+    private fun call(action: String, url: String, credentials: List<Credentials>, bodyXml: String): Node {
+        val response = authenticated(action, url, credentials, bodyXml)
         val fault = response.fault
         if (fault != null) throw OnvifException("$action at $url failed: $fault")
         return response
     }
 
-    /** Returns the response Envelope, which may still carry a fault other than the first NotAuthorized. */
-    private fun authenticated(action: String, url: String, username: String, password: String?, bodyXml: String): Node {
+    /** Returns the response Envelope, which may still carry a fault other than NotAuthorized. */
+    private fun authenticated(action: String, url: String, credentials: List<Credentials>, bodyXml: String): Node {
         if (!authRequired) {
             val response = request(url, envelope(bodyXml, null, null))
             val fault = response.fault
             if (fault == null || !fault.contains("NotAuthorized")) return response
             authRequired = true
         }
-        if (password == null) throw OnvifException("$action at $url requires a login")
-        return request(url, envelope(bodyXml, username, password))
+        val locked = matchedCredentials
+        if (locked != null) {
+            val response = request(url, envelope(bodyXml, locked.username, locked.password))
+            val fault = response.fault
+            if (fault == null || !fault.contains("NotAuthorized")) return response
+            matchedCredentials = null
+        }
+        if (credentials.isEmpty()) throw OnvifException("$action at $url requires a login")
+        var lastResponse: Node? = null
+        for (candidate in credentials) {
+            val response = request(url, envelope(bodyXml, candidate.username, candidate.password))
+            lastResponse = response
+            val fault = response.fault
+            if (fault == null || !fault.contains("NotAuthorized")) {
+                matchedCredentials = candidate
+                return response
+            }
+        }
+        return checkNotNull(lastResponse)
     }
 
     private fun request(url: String, soap: String): Node {
@@ -219,5 +243,9 @@ class OnvifClient(private val http: OkHttpClient = OkHttpClient()) {
         private const val MEDIA_NS = "http://www.onvif.org/ver10/media/wsdl"
         private const val SCHEMA_NS = "http://www.onvif.org/ver10/schema"
         private val SOAP_MEDIA_TYPE = "application/soap+xml; charset=utf-8".toMediaType()
+        private val DEFAULT_HTTP = OkHttpClient.Builder()
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
+            .build()
     }
 }

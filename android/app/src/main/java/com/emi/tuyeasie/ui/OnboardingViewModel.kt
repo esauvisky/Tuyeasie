@@ -18,8 +18,10 @@ import com.emi.tuyeasie.data.CameraOnvifRepository
 import com.emi.tuyeasie.data.DeviceAddress
 import com.emi.tuyeasie.data.DeviceAddressException
 import com.emi.tuyeasie.data.DeviceAddressResolver
+import com.emi.tuyeasie.data.DetectedStream
 import com.emi.tuyeasie.data.DeviceCapabilities
 import com.emi.tuyeasie.data.CountryCodeProvider
+import com.emi.tuyeasie.data.Credentials
 import com.emi.tuyeasie.data.HotspotRepository
 import com.emi.tuyeasie.data.ImportState
 import com.emi.tuyeasie.data.NearbyNetwork
@@ -215,6 +217,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     private val go2rtcClient = Go2RtcClient()
     private val _uiState = kotlinx.coroutines.flow.MutableStateFlow(OnboardingUiState())
     private val importGeneration = AtomicLong(0)
+    private val scanGeneration = AtomicLong(0)
     private var pendingCameraDevice: TuyaBleDevice? = null
     private var pendingCameraAccount: TuyaAccount? = null
     private var pendingAfterReady: (() -> Unit)? = null
@@ -895,7 +898,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
             }
         }
         viewModelScope.launch {
-            if (current.scanStatus == ScanStatus.IDLE && current.networkReport == null) rescanNetwork()
+            if (current.scanStatus == ScanStatus.IDLE && current.networkReport == null && (!capabilities.tuyaOnvif || current.onvifRecord != null)) rescanNetwork()
             if (!capabilities.tuyaLan) {
                 update { copy(tuyaLocalUnavailable = NO_TUYA_LAN_MESSAGE) }
                 return@launch
@@ -1024,7 +1027,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                     val record = onvifRepository.configure(
                         device,
                         existingPassword,
-                        CameraOnvifRepository.DEFAULT_PASSWORD,
+                        targetPassword = null,
                         onProgress = { message ->
                             if (generation == importGeneration.get()) {
                                 update { copy(activationProgress = "Configuring ONVIF: $message") }
@@ -1142,47 +1145,59 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     // Blocking.
-    private fun locate(deviceId: String, capabilities: DeviceCapabilities): DeviceAddress {
-        val (username, password) = onvifCredentials(deviceId)
-        return addressResolver.resolve(deviceId, capabilities, store.loadOnvifRecord(deviceId), username, password)
-    }
+    private fun locate(deviceId: String, capabilities: DeviceCapabilities): DeviceAddress =
+        addressResolver.resolve(
+            deviceId,
+            capabilities,
+            store.loadOnvifRecord(deviceId),
+            Credentials.candidates(preferredCredentials(deviceId))
+        )
 
-    // Credentials the device's ONVIF and RTSP accept: the saved record's, else ones entered under Advanced, else admin/admin.
-    private fun onvifCredentials(deviceId: String): Pair<String, String> {
+    private fun preferredCredentials(deviceId: String): Credentials? {
         val record = store.loadOnvifRecord(deviceId)
-        if (record != null) return record.username to record.password
-        return (store.loadPendingOnvifUsername(deviceId) ?: CameraOnvifRepository.DEFAULT_USERNAME) to
-            (store.loadPendingOnvifPassword(deviceId) ?: CameraOnvifRepository.DEFAULT_PASSWORD)
+        if (record != null) return Credentials(record.username, record.password)
+        val user = store.loadPendingOnvifUsername(deviceId)
+        val pass = store.loadPendingOnvifPassword(deviceId)
+        if (user != null || pass != null) {
+            return Credentials(
+                user ?: CameraOnvifRepository.DEFAULT_USERNAME,
+                pass ?: CameraOnvifRepository.DEFAULT_PASSWORD
+            )
+        }
+        return null
     }
 
     private fun launchNetworkScan(deviceId: String, capabilities: DeviceCapabilities, address: DeviceAddress) {
-        fun forThisDevice(transform: OnboardingUiState.() -> OnboardingUiState) =
-            update { if (activatedDevice?.deviceId == deviceId) transform() else this }
-        forThisDevice { copy(scanStatus = ScanStatus.SCANNING, scanProgress = "Scanning ports on ${address.ip}…", scanError = null) }
+        val generation = scanGeneration.incrementAndGet()
+        fun forThisScan(transform: OnboardingUiState.() -> OnboardingUiState) =
+            update { if (activatedDevice?.deviceId == deviceId && scanGeneration.get() == generation) transform() else this }
+        forThisScan { copy(scanStatus = ScanStatus.SCANNING, scanProgress = "Scanning ports on ${address.ip}…", scanError = null) }
         viewModelScope.launch {
             val ports = PortScanner.scan(address.ip) { done, total ->
                 viewModelScope.launch {
-                    forThisDevice { copy(scanProgress = "Scanning ports on ${address.ip}: $done of $total") }
+                    forThisScan { copy(scanProgress = "Scanning ports on ${address.ip}: $done of $total") }
                 }
             }
-            forThisDevice { copy(scanProgress = "Checking ONVIF and video streams on ${address.ip}…") }
-            val (username, password) = withContext(Dispatchers.IO) { onvifCredentials(deviceId) }
-            val report = withContext(Dispatchers.IO) { probeServices(address, ports, username, password) }
+            if (scanGeneration.get() != generation) return@launch
+            forThisScan { copy(scanProgress = "Checking ONVIF and video streams on ${address.ip}…") }
+            val preferred = withContext(Dispatchers.IO) { preferredCredentials(deviceId) }
+            val (report, matchedCredentials) = withContext(Dispatchers.IO) { probeServices(address, ports, preferred) }
+            if (scanGeneration.get() != generation) return@launch
             withContext(Dispatchers.IO) { store.saveNetworkReport(deviceId, report) }
             val streams = report.onvif?.streams.orEmpty().ifEmpty { report.portScanStreams }
-            // Tuya-ONVIF cameras get their streams from their own setup; other devices take what the scan found.
-            val adopted = if (!capabilities.tuyaOnvif && streams.isNotEmpty()) {
+            val adopted = if (streams.isNotEmpty() && (!capabilities.tuyaOnvif || current.onvifRecord == null)) {
                 withContext(Dispatchers.IO) {
                     val existing = store.loadOnvifRecord(deviceId)
+                    val creds = matchedCredentials ?: preferred ?: Credentials.DEFAULT
                     val main = streams[0]
                     val sub = streams.getOrNull(1)
                     val unchanged = existing != null && existing.mainUrl == main.url && existing.subUrl == sub?.url &&
-                        existing.username == username && existing.password == password
+                        existing.username == creds.username && existing.password == creds.password
                     OnvifRecord(
                         deviceId = deviceId,
                         address = address.ip,
-                        username = username,
-                        password = password,
+                        username = creds.username,
+                        password = creds.password,
                         mainUrl = main.url,
                         subUrl = sub?.url,
                         destination = existing?.destination,
@@ -1196,7 +1211,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                     ).also(store::saveOnvifRecord)
                 }
             } else null
-            forThisDevice {
+            forThisScan {
                 val withReport = copy(networkReport = report, scanStatus = ScanStatus.IDLE, scanProgress = null)
                 if (adopted == null) withReport
                 else withReport.copy(onvifRecord = adopted, onvifStatus = OnvifStatus.COMPLETE, onvifError = null)
@@ -1208,9 +1223,9 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     private fun probeServices(
         address: DeviceAddress,
         ports: List<OpenPort>,
-        username: String,
-        password: String
-    ): NetworkReport {
+        preferred: Credentials?
+    ): Pair<NetworkReport, Credentials?> {
+        val candidates = Credentials.candidates(preferred)
         val serviceUrls = (
             OnvifDiscovery.discover(getApplication()).filter { it.ip == address.ip }.flatMap { it.serviceUrls } +
                 ports.filter { it.service == PortScanner.SERVICE_ONVIF }
@@ -1220,7 +1235,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         var onvifError: String? = null
         if (serviceUrls.isNotEmpty()) {
             try {
-                onvif = OnvifClient().probe(serviceUrls.first(), username, password)
+                onvif = OnvifClient().probe(serviceUrls.first(), candidates)
             } catch (exception: OnvifException) {
                 onvifError = exception.message
             } catch (exception: IOException) {
@@ -1230,35 +1245,44 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
             }
         }
         val rtspPorts = ports.filter { it.service == PortScanner.SERVICE_RTSP }.map { it.port }
-        val guessed = if (onvif == null || onvif.streams.isEmpty()) {
-            PortScanner.guessRtspStreams(address.ip, rtspPorts, username, password)
-        } else emptyList()
-        return NetworkReport(
+        val (guessed, guessedCredentials) = if (onvif == null || onvif.streams.isEmpty()) {
+            PortScanner.guessRtspStreams(address.ip, rtspPorts, candidates)
+        } else emptyList<DetectedStream>() to null
+        val matched = when {
+            onvif != null && !onvif.authRequired -> Credentials("", "")
+            onvif?.credentials != null -> onvif.credentials
+            guessedCredentials != null -> guessedCredentials
+            else -> null
+        }
+        val report = NetworkReport(
             ip = address.ip,
             addressSource = address.source,
             scannedAt = System.currentTimeMillis(),
             openPorts = ports,
             onvif = onvif,
-            onvifError = onvifError?.let { sanitizeError(it, current.settings, null, password) },
+            onvifError = onvifError?.let { sanitizeError(it, current.settings, null, preferred?.password) },
             portScanStreams = guessed
         )
+        return report to matched
     }
 
     fun rescanNetwork() {
         val device = checkNotNull(current.activatedDevice) { "No device to scan" }
         val capabilities = checkNotNull(current.capabilities) { "No capabilities for ${device.deviceId}" }
         check(current.scanStatus == ScanStatus.IDLE) { "A scan is already running" }
+        val generation = scanGeneration.incrementAndGet()
         update { copy(scanStatus = ScanStatus.SCANNING, scanProgress = "Finding the device on the local network…", scanError = null) }
         viewModelScope.launch {
             val address = try {
                 withContext(Dispatchers.IO) { locate(device.deviceId, capabilities) }
             } catch (exception: DeviceAddressException) {
                 update {
-                    if (activatedDevice?.deviceId != device.deviceId) this
+                    if (activatedDevice?.deviceId != device.deviceId || scanGeneration.get() != generation) this
                     else copy(scanStatus = ScanStatus.IDLE, scanProgress = null, scanError = "Local address unknown: ${exception.message}")
                 }
                 return@launch
             }
+            if (scanGeneration.get() != generation) return@launch
             launchNetworkScan(device.deviceId, capabilities, address)
         }
     }
@@ -1290,7 +1314,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         }
         val generation = importGeneration.get()
         markOnvifConfiguring()
-        viewModelScope.launch { configureOnvif(device, CameraOnvifRepository.DEFAULT_PASSWORD, generation) }
+        viewModelScope.launch { configureOnvif(device, targetPassword = null, generation) }
     }
 
     /** Advanced: sets a new ONVIF password on a camera whose ONVIF is controlled through Tuya data points. */
@@ -1320,8 +1344,10 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    private fun markOnvifConfiguring() = update {
-        copy(
+    private fun markOnvifConfiguring() {
+        scanGeneration.incrementAndGet()
+        update {
+            copy(
             onvifStatus = OnvifStatus.CONFIGURING,
             onvifError = null,
             onvifProgress = "Starting ONVIF setup…",
@@ -1333,11 +1359,15 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
             mainError = null,
             subError = null,
             mainEntryId = null,
-            subEntryId = null
+            subEntryId = null,
+            scanStatus = ScanStatus.IDLE,
+            scanProgress = null,
+            scanError = null
         )
+        }
     }
 
-    private suspend fun configureOnvif(device: ActivatedDevice, targetPassword: String, generation: Long) {
+    private suspend fun configureOnvif(device: ActivatedDevice, targetPassword: String?, generation: Long) {
         val capabilities = checkNotNull(current.capabilities) { "No capabilities for ${device.deviceId}" }
         val existingPassword = withContext(Dispatchers.IO) { knownOnvifPassword(device.deviceId) }
         if (generation != importGeneration.get()) return
@@ -1670,7 +1700,8 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     )
 
     private fun authenticatedUrl(url: String, record: OnvifRecord) =
-        url.replaceFirst("rtsp://", "rtsp://${record.username}:${record.password}@")
+        if (record.username.isEmpty() && record.password.isEmpty()) url
+        else url.replaceFirst("rtsp://", "rtsp://${record.username}:${record.password}@")
 
     private fun normalizedSettings() = current.settings.copy(
         hassUrl = current.settings.hassUrl.trim(),
