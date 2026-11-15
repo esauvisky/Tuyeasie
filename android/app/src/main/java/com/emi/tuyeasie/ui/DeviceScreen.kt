@@ -181,11 +181,24 @@ private fun NetworkCard(state: OnboardingUiState, viewModel: OnboardingViewModel
             if (!scanning && state.scanError == null) CardText("Not scanned yet.")
             return@HaCard
         }
-        EntityRow(icon = { EntityIcon(Icons.Outlined.Router, RowTone.NEUTRAL) }, title = report.ip ?: "LAN address unavailable",
-            state = listOfNotNull(report.addressSource?.label, state.capabilities?.mac?.let { "MAC $it" }, "scanned " + DateUtils.getRelativeTimeSpanString(report.scannedAt)).joinToString(" · "))
+        EntityRow(
+            icon = { EntityIcon(Icons.Outlined.Router, RowTone.NEUTRAL) },
+            title = report.ip ?: "No LAN address found",
+            state = listOfNotNull(
+                report.addressSource?.label,
+                state.capabilities?.mac?.let { "MAC $it" },
+                "Scanned ${DateUtils.getRelativeTimeSpanString(report.scannedAt)}"
+            ).joinToString("\n")
+        )
         if (report.openPorts.isEmpty()) CardText("No open TCP ports.")
-        report.openPorts.forEach { port -> EntityRow(icon = { EntityIcon(Icons.Outlined.Lan, RowTone.NEUTRAL) }, title = "${port.port} · ${port.service}", state = listOfNotNull(port.description, port.detail).joinToString("\n")) }
-        CardText("All 65535 TCP ports were checked. UDP services are not scanned.")
+        report.openPorts.forEach { port ->
+            EntityRow(
+                icon = { EntityIcon(Icons.Outlined.Lan, RowTone.NEUTRAL) },
+                title = port.description,
+                state = listOfNotNull("Port ${port.port}", port.detail).joinToString(" · ")
+            )
+        }
+        CardText("Checked all 65,535 TCP ports. UDP is not scanned.")
     }
 }
 

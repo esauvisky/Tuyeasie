@@ -83,79 +83,80 @@ object PortScanner {
         return streams to matched
     }
 
-    private class Known(val label: String, val description: String)
+    // [name] is what the port usually is, shown when no probe confirms it.
+    private class Known(val label: String, val name: String)
 
     private val knownPorts = mapOf(
-        21 to Known("FTP", "File transfer"),
-        22 to Known("SSH", "Secure shell"),
-        23 to Known("Telnet", "Unencrypted remote shell"),
-        25 to Known("SMTP", "Mail transfer"),
-        53 to Known("DNS", "Domain name service"),
-        80 to Known("HTTP", "Web interface"),
-        81 to Known("HTTP", "Alternate web interface, common on cameras"),
-        88 to Known("HTTP", "Alternate web interface on some cameras (Kerberos elsewhere)"),
-        443 to Known("HTTPS", "Secure web interface"),
-        502 to Known("Modbus", "Industrial control protocol"),
-        554 to Known("RTSP", "Standard video streaming port"),
-        1883 to Known("MQTT", "IoT message broker"),
-        1935 to Known("RTMP", "Live video streaming"),
-        2000 to Known("Vendor", "Vendor control port on some cameras (Cisco SCCP elsewhere)"),
-        3000 to Known("HTTP", "Web interface or development server"),
-        5000 to Known("ONVIF/HTTP", "ONVIF/HTTP on some cameras"),
-        5353 to Known("mDNS", "Multicast DNS service discovery"),
-        6554 to Known("RTSP", "Video streaming on some cameras"),
-        6668 to Known("Tuya", "Tuya local protocol (what Tuya Local in Home Assistant uses)"),
-        6669 to Known("Tuya", "Tuya local protocol, secondary port"),
-        7000 to Known("Vendor", "Vendor media/control port on some cameras"),
-        8000 to Known("HTTP/ONVIF", "Web interface or ONVIF on some cameras"),
-        8080 to Known("HTTP/ONVIF", "Web interface or ONVIF on some cameras"),
-        8081 to Known("HTTP", "Alternate web interface"),
-        8443 to Known("HTTPS", "Alternate secure web interface"),
-        8554 to Known("RTSP", "Alternate video streaming port"),
-        8883 to Known("MQTT/TLS", "MQTT over TLS"),
-        8899 to Known("ONVIF", "ONVIF on some cameras"),
-        9000 to Known("Vendor", "Hikvision SDK/various"),
-        9527 to Known("Vendor", "Debug/control console on some cameras"),
-        10000 to Known("ONVIF/HTTP", "ONVIF on some cameras"),
-        10554 to Known("RTSP", "Alternate video streaming port"),
-        34567 to Known("XMEye", "XMEye/NetSurveillance (DVR/camera protocol)"),
-        37777 to Known("Dahua", "Dahua camera/NVR control protocol"),
-        49152 to Known("UPnP", "UPnP device description and control")
+        21 to Known("FTP", "File transfer (FTP)"),
+        22 to Known("SSH", "Remote shell (SSH)"),
+        23 to Known("Telnet", "Remote shell (Telnet)"),
+        25 to Known("SMTP", "Mail server (SMTP)"),
+        53 to Known("DNS", "DNS server"),
+        80 to Known("HTTP", "Web page"),
+        81 to Known("HTTP", "Web page"),
+        88 to Known("HTTP", "Web page"),
+        443 to Known("HTTPS", "Secure web page"),
+        502 to Known("Modbus", "Modbus industrial control"),
+        554 to Known("RTSP", "Video stream (RTSP)"),
+        1883 to Known("MQTT", "MQTT broker"),
+        1935 to Known("RTMP", "Video stream (RTMP)"),
+        2000 to Known("Vendor", "Vendor control port"),
+        3000 to Known("HTTP", "Web page"),
+        5000 to Known("ONVIF/HTTP", "Web page or ONVIF"),
+        5353 to Known("mDNS", "Network discovery (mDNS)"),
+        6554 to Known("RTSP", "Video stream (RTSP)"),
+        6668 to Known("Tuya", "Tuya local control"),
+        6669 to Known("Tuya", "Tuya local control"),
+        7000 to Known("Vendor", "Vendor media port"),
+        8000 to Known("HTTP/ONVIF", "Web page or ONVIF"),
+        8080 to Known("HTTP/ONVIF", "Web page or ONVIF"),
+        8081 to Known("HTTP", "Web page"),
+        8443 to Known("HTTPS", "Secure web page"),
+        8554 to Known("RTSP", "Video stream (RTSP)"),
+        8883 to Known("MQTT/TLS", "MQTT broker"),
+        8899 to Known("ONVIF", "ONVIF camera control"),
+        9000 to Known("Vendor", "Vendor SDK port"),
+        9527 to Known("Vendor", "Vendor debug console"),
+        10000 to Known("ONVIF/HTTP", "ONVIF camera control"),
+        10554 to Known("RTSP", "Video stream (RTSP)"),
+        34567 to Known("XMEye", "XMEye DVR protocol"),
+        37777 to Known("Dahua", "Dahua camera protocol"),
+        49152 to Known("UPnP", "UPnP device control")
     )
 
+    /** [OpenPort.description] names what answered; [OpenPort.detail] is what the probe learned about it. */
     private fun identify(ip: String, port: Int): OpenPort {
         val known = knownPorts[port]
-        val description = if (known != null) known.description else "Not a well-known port"
         // Only a probe confirms a protocol; the port number alone is a hint.
         val fallbackService = if (known != null) "${known.label} (unconfirmed)" else "Unknown"
 
         val banner = readBanner(ip, port)
         if (banner != null) {
-            val service = when {
-                banner.startsWith("SSH-") -> "SSH"
-                banner.startsWith("220") && banner.contains("SMTP", ignoreCase = true) -> "SMTP"
-                banner.startsWith("220") -> "FTP"
-                banner == TELNET_NEGOTIATION -> "Telnet"
+            val confirmed = when {
+                banner.startsWith("SSH-") -> "SSH" to "Remote shell (SSH)"
+                banner.startsWith("220") && banner.contains("SMTP", ignoreCase = true) -> "SMTP" to "Mail server (SMTP)"
+                banner.startsWith("220") -> "FTP" to "File transfer (FTP)"
+                banner == TELNET_NEGOTIATION -> "Telnet" to "Remote shell (Telnet)"
                 else -> null
             }
-            if (service != null) return OpenPort(port, service, description, banner)
+            if (confirmed != null) {
+                return OpenPort(port, confirmed.first, confirmed.second, banner.takeIf { it != TELNET_NEGOTIATION })
+            }
         }
         val rtsp = RtspClient.options(ip, port, PROBE_TIMEOUT_MS)
         if (rtsp != null) {
-            val detail = listOfNotNull(
-                rtsp.headers["server"]?.let { "Server: ${it.first()}" },
-                rtsp.headers["public"]?.let { "Public: ${it.first()}" }
-            ).joinToString("; ")
-            return OpenPort(port, SERVICE_RTSP, description, detail.ifEmpty { null })
+            return OpenPort(port, SERVICE_RTSP, "Video stream (RTSP)", rtsp.headers["server"]?.let { "Server: ${it.first()}" })
         }
         val http = probeHttp(ip, port)
         val onvif = probeOnvif(ip, port)
-        if (onvif != null) {
-            return OpenPort(port, SERVICE_ONVIF, description, listOfNotNull(onvif, http).joinToString("; "))
+        if (onvif != null) return OpenPort(port, SERVICE_ONVIF, "ONVIF camera control", onvif)
+        if (http != null) return OpenPort(port, "HTTP", "Web page", http.ifEmpty { null })
+        if (probeTls(ip, port)) {
+            val name = if (known?.label == "HTTPS") known.name else "Encrypted service (TLS)"
+            return OpenPort(port, "TLS", name, null)
         }
-        if (http != null) return OpenPort(port, "HTTP", description, http)
-        if (probeTls(ip, port)) return OpenPort(port, "TLS", description, null)
-        return OpenPort(port, fallbackService, description, banner)
+        val unconfirmed = if (known != null) "Guessed from the port number; no probe got an answer" else "No probe got an answer"
+        return OpenPort(port, fallbackService, known?.name ?: "Unknown service", banner?.let { "Says: $it" } ?: unconfirmed)
     }
 
     private const val TELNET_NEGOTIATION = "Telnet option negotiation"
@@ -184,17 +185,26 @@ object PortScanner {
 
     private class HttpReply(val statusLine: String, val headers: Map<String, List<String>>, val body: String)
 
+    /** The page title, whether it wants a login, and the server software; empty when the reply has none of them. */
     private fun probeHttp(ip: String, port: Int): String? {
         val reply = exchange(
             ip, port,
             "GET / HTTP/1.0\r\nHost: $ip:$port\r\nUser-Agent: tuyeasie\r\nConnection: close\r\n\r\n".toByteArray(Charsets.US_ASCII)
         ) ?: return null
         val title = Regex("<title[^>]*>([^<]*)", RegexOption.IGNORE_CASE).find(reply.body)?.groupValues?.get(1)?.trim()
+        val status = reply.statusLine.substringAfter(' ')
+        val code = status.substringBefore(' ').toIntOrNull()
+        val access = when {
+            code == null || code in 200..299 -> null
+            code == 401 || code == 403 -> "Login required"
+            code in 300..399 -> "Redirects elsewhere"
+            else -> "Answers $status"
+        }
         return listOfNotNull(
-            reply.statusLine,
-            reply.headers["server"]?.let { "Server: ${it.first()}" },
-            title?.takeIf { it.isNotEmpty() }?.let { "Title: $it" }
-        ).joinToString("; ")
+            title?.takeIf { it.isNotEmpty() }?.let { "\"$it\"" },
+            access,
+            reply.headers["server"]?.let { "Server: ${it.first()}" }
+        ).joinToString(" · ")
     }
 
     private fun probeOnvif(ip: String, port: Int): String? {
@@ -208,7 +218,7 @@ object PortScanner {
             "Content-Type: application/soap+xml; charset=utf-8\r\nContent-Length: ${soap.size}\r\nConnection: close\r\n\r\n"
         val reply = exchange(ip, port, head.toByteArray(Charsets.US_ASCII) + soap) ?: return null
         if (!reply.body.contains("Envelope")) return null
-        return if (reply.body.contains("NotAuthorized")) "ONVIF login required" else "ONVIF answered without login"
+        return if (reply.body.contains("NotAuthorized")) "Login required" else "No login needed"
     }
 
     /** Null when the peer did not answer with an HTTP response (closed, reset, silent or another protocol). */
