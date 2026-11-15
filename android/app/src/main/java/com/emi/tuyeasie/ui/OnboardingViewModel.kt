@@ -830,7 +830,6 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         }
         viewModelScope.launch {
             if (current.networkReport == null) rescanNetwork()
-            refreshDataPoints()
         }
     }
 

@@ -16,10 +16,12 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Lan
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Router
+import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -37,6 +39,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -44,7 +47,6 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import com.alibaba.fastjson.JSON
 import com.emi.tuyeasie.data.CameraOnvifRepository
 import com.emi.tuyeasie.data.IntegrationStatus
 import com.emi.tuyeasie.ui.theme.LocalHaBar
@@ -57,6 +59,11 @@ fun DeviceScreen(state: OnboardingUiState, viewModel: OnboardingViewModel, iconU
         state.integrationOptions.any { it.status == IntegrationStatus.ADDING }
     val bar = LocalHaBar.current
     var menuOpen by remember { mutableStateOf(false) }
+    var dataPointsOpen by rememberSaveable(device.deviceId) { mutableStateOf(false) }
+    if (dataPointsOpen) {
+        DataPointsScreen(state, viewModel) { dataPointsOpen = false }
+        return
+    }
     BackHandler { if (!busy) viewModel.closeDeviceScreen() }
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -91,8 +98,8 @@ fun DeviceScreen(state: OnboardingUiState, viewModel: OnboardingViewModel, iconU
             }
             HomeAssistantIntegrationsCard(state, viewModel, onOpenSettings)
             NetworkCard(state, viewModel)
+            DataPointsLink(state) { dataPointsOpen = true }
             DetailsCard(state, viewModel)
-            DataPointsCard(state, viewModel)
             AdvancedCard(state, viewModel)
         }
     }
@@ -200,45 +207,20 @@ private fun DetailsCard(state: OnboardingUiState, viewModel: OnboardingViewModel
 }
 
 @Composable
-private fun DataPointsCard(state: OnboardingUiState, viewModel: OnboardingViewModel) {
-    val capabilities = checkNotNull(state.capabilities) { "Data point card without device schema" }
-    HaCard(title = "Data points", actions = { CardAction("Read all", viewModel::refreshDataPoints) }) {
-        if (capabilities.dataPoints.isEmpty()) CardText("No Tuya data points were reported for this device.")
-        capabilities.dataPoints.forEach { schema ->
-            val point = checkNotNull(state.manualDataPoints[schema.id]) { "No state for data point ${schema.id}" }
-            var value by remember(schema.id, point.value) { mutableStateOf(point.value?.toString().orEmpty()) }
-            EntityRow(icon = { EntityIcon(categoryIcon(state.activatedDevice?.category), if (point.error != null) RowTone.FAILED else RowTone.NEUTRAL, busy = point.reading || point.writing) },
-                title = "${schema.name} · ${schema.code}",
-                state = "DP ${schema.id} · ${schema.type} · ${if (schema.writable) "read/write" else "read-only"}\n${point.error ?: point.value?.toString() ?: "Not read"}",
-                tone = if (point.error != null) RowTone.FAILED else RowTone.NEUTRAL) {
-                CardAction("Read", { viewModel.readDataPoint(schema.id) }, enabled = !point.reading && !point.writing)
-            }
-            val editorType = schema.editorType
-            when (editorType) {
-                "boolean" -> ChoiceRow("${schema.name}: $value", value == "true") { value = (value != "true").toString() }
-                "enum" -> {
-                    val range = JSON.parseObject(schema.propertyJson).getJSONArray("range")
-                    Column(Modifier.padding(start = 16.dp)) {
-                        (0 until range.size).forEach { index ->
-                            val option = range.getString(index)
-                            ChoiceRow(option, option == value) { value = option }
-                        }
-                    }
-                }
-                "integer", "number", "string" -> OutlinedTextField(
-                    value = value,
-                    onValueChange = { value = it },
-                    label = { Text(schema.name) },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = if (editorType == "integer" || editorType == "number") KeyboardType.Number else KeyboardType.Text),
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
-                )
-                null -> if (schema.writable) CardText("This writable schema has no supported editor and is read-only in Tuyeasie.")
-            }
-            if (editorType != null) Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.End) {
-                CardAction("Set", { viewModel.setDataPoint(schema.id, value) }, enabled = !point.reading && !point.writing)
-            }
-        }
+private fun DataPointsLink(state: OnboardingUiState, onOpen: () -> Unit) {
+    val points = checkNotNull(state.capabilities) { "Data points without device schema" }.dataPoints
+    if (points.isEmpty()) return
+    val writable = points.count { it.writable }
+    HaCard(title = null) {
+        EntityRow(
+            icon = { EntityIcon(Icons.Outlined.Tune, RowTone.NEUTRAL) },
+            title = "Data points",
+            state = listOfNotNull(
+                writable.takeIf { it > 0 }?.let { "$it controls" },
+                (points.size - writable).takeIf { it > 0 }?.let { "$it read-only" }
+            ).joinToString(" · "),
+            onClick = onOpen
+        ) { Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant) }
     }
 }
 
