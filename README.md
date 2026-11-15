@@ -30,8 +30,8 @@ Tick the ones you want and add them in one go. Anything that cannot be added is 
 
 The device screen also has:
 
-- **Data points.** Every DP in the schema with its type and mode. Read any of them; write the writable ones with an editor that matches the type (switch, enum list, number within min and max, text).
-- **Network.** LAN address, MAC, and each open port with what answered on it.
+- **Data points.** Opens its own screen with every DP in the schema, split into controls and read-only status, with live values and units. Flip a switch, pick from an enum, or type a number within its min and max, and it is written straight to the device.
+- **Network.** LAN address and how it was found, MAC, and each open port named by what actually answered on it (video stream, ONVIF, web page, Tuya local control), plus whether it wants a login.
 - **Details.** Device ID, local key, product ID, category, protocol version. All copyable.
 - **Advanced.** ONVIF service URL, RTSP URLs, and the ONVIF login the app should use.
 
