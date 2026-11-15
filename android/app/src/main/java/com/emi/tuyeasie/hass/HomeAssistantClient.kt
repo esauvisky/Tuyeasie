@@ -117,7 +117,9 @@ class HomeAssistantClient(
                 val index = option.key.substringAfter(':').toInt()
                 val stream = checkNotNull(streams.getOrNull(index)) { "No verified RTSP stream at index $index" }
                 val used = credentials ?: report.onvif?.credentials ?: Credentials.DEFAULT
-                createCamera("${device.name} ${stream.name}", stream.url, used.username, used.password)
+                // Stream names are firmware profile tokens such as PROFILE_001, so the entry is named by position.
+                val title = if (index == 1) "${device.name} Substream" else "${device.name} Stream ${index + 1}"
+                createCamera(title, stream.url, used.username, used.password)
             } else throw HomeAssistantException(HomeAssistantError.INVALID_FORMAT, "No explicit setup adapter for ${option.key}")
         }
         return entryAssociation(entryId, checkNotNull(option.handler))
