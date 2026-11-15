@@ -435,6 +435,11 @@ class SecureSettingsStore(context: Context) {
         check(committed) { "Unable to persist network report" }
     }
 
+    fun loadCachedDeviceIds(): Set<String> = preferences.all.keys
+        .filter { it.startsWith(KEY_CAPABILITIES_PREFIX) }
+        .map { it.removePrefix(KEY_CAPABILITIES_PREFIX) }
+        .toSet()
+
     fun loadCachedDevices(accountUid: String): List<TuyaManagedDevice>? {
         val raw = preferences.getString(KEY_CACHED_DEVICES_PREFIX + accountUid, null) ?: return null
         val array = JSONArray(raw)

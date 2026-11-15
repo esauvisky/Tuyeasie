@@ -47,8 +47,11 @@ data class MyDevicesUiState(
     val unpairingDeviceId: String? = null,
     val actionError: String? = null,
     val backupDialogOpen: Boolean = false,
+    // Empty means the backup uses the app-wide key instead of a passphrase.
     val backupPassphrase: String = "",
     val backupPassphraseConfirm: String = "",
+    // Set when the file picker opens; lost if Android kills the app meanwhile, along with the passphrase.
+    val backupExportPending: Boolean = false,
     val exportingBackup: Boolean = false,
     val backupError: String? = null,
     val backupExported: Boolean = false
@@ -195,13 +198,7 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun openBackupDialog() = _uiState.update {
-        it.copy(
-            backupDialogOpen = true,
-            backupPassphrase = "",
-            backupPassphraseConfirm = "",
-            backupError = null,
-            backupExported = false
-        )
+        it.copy(backupDialogOpen = true, backupPassphrase = "", backupPassphraseConfirm = "", backupError = null, backupExported = false)
     }
 
     fun dismissBackupDialog() = _uiState.update {
@@ -215,20 +212,20 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
     /** Closes the dialog but keeps the passphrase until the file picker returns. */
     fun startBackupExport() {
         val state = _uiState.value
-        check(state.backupPassphrase.length >= MIN_BACKUP_PASSPHRASE_LENGTH) { "Backup passphrase too short" }
+        check(state.backupPassphrase.isEmpty() || state.backupPassphrase.length >= MIN_BACKUP_PASSPHRASE_LENGTH) { "Backup passphrase too short" }
         check(state.backupPassphrase == state.backupPassphraseConfirm) { "Backup passphrases differ" }
-        _uiState.update { it.copy(backupDialogOpen = false) }
+        _uiState.update { it.copy(backupDialogOpen = false, backupExportPending = true) }
     }
 
     fun onBackupFileChosen(uri: Uri?) {
-        val passphrase = _uiState.value.backupPassphrase
-        _uiState.update { it.copy(backupPassphrase = "", backupPassphraseConfirm = "") }
+        val state = _uiState.value
+        _uiState.update { it.copy(backupPassphrase = "", backupPassphraseConfirm = "", backupExportPending = false) }
         if (uri == null) return
-        // The passphrase only lives in memory, so it is gone if Android killed the app while the picker was open.
-        if (passphrase.isEmpty()) {
+        if (!state.backupExportPending) {
             _uiState.update { it.copy(backupError = "The app restarted while choosing the file. Export the backup again.") }
             return
         }
+        val passphrase = state.backupPassphrase.ifEmpty { null }
         val accounts = repository.savedAccounts()
         _uiState.update { it.copy(exportingBackup = true, backupError = null, backupExported = false) }
         viewModelScope.launch {
