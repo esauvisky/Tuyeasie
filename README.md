@@ -1,6 +1,6 @@
 # Tuyeasie
 
-Tuya will sell you a plug, then charge you a developer account, a cloud project, and a support ticket before it admits the thing has a local key. Tuyeasie skips that. Pair the device from your phone and it lands in Home Assistant, key included. No Smart Life account, no IoT portal, no `tinytuya wizard`.
+Tuya will sell you a plug, then charge you a developer account, a cloud project, and a support ticket before it admits the thing has a local key. Tuyeasie skips that. Pair the device from your phone, pick how it goes into Home Assistant, and it lands there, key included. No Smart Life account, no IoT portal, no `tinytuya wizard`.
 
 https://github.com/user-attachments/assets/12284b7a-01b0-45f3-916b-752d80196c42
 
@@ -14,14 +14,37 @@ Grab the APK from [GitHub Releases](https://github.com/esauvisky/Tuyeasie/releas
 2. Make an administrator long-lived access token.
 3. In the app, open Settings. Home Assistant URL, the token, and the 2.4 GHz Wi-Fi the device should join.
 4. Open Pair. Reset the device until it blinks fast, then tap it.
+5. Wait for the scan, then pick the integrations you want. Skip is fine; you can add them later from the device screen.
 
 The phone and Home Assistant need to be on the same network. Pairing uses the internet once. After that the device is controlled locally, which was the point.
+
+## What it does after pairing
+
+The app looks at what the device actually is before offering anything. It reads the Tuya data point schema, finds the device on the LAN, checks all 65535 TCP ports, and probes ONVIF and RTSP. Then it asks Home Assistant which config flows are installed and offers only what both sides can do:
+
+- **Tuya Local** when the device speaks the local Tuya protocol and has data points.
+- **ONVIF** when an ONVIF service answers.
+- **Generic Camera**, one per verified RTSP stream, main and substream separately.
+
+Tick the ones you want and add them in one go. Anything that cannot be added is simply not offered. One device can have several integrations at once, each with its own Add, Open, or error state. Open jumps to it in Home Assistant.
+
+The device screen also has:
+
+- **Data points.** Every DP in the schema with its type and mode. Read any of them; write the writable ones with an editor that matches the type (switch, enum list, number within min and max, text).
+- **Network.** LAN address, MAC, and each open port with what answered on it.
+- **Details.** Device ID, local key, product ID, category, protocol version. All copyable.
+- **Advanced.** ONVIF service URL, RTSP URLs, and the ONVIF login the app should use.
+
+The Devices tab lists everything on every Tuya account saved on the phone. Long-press a device to copy its ID or local key, or to unpair it. Unpair removes every Home Assistant entry the device has, then removes it from Tuya.
+
+Settings has an encrypted backup of accounts, Home Assistant, Wi-Fi, devices, and camera logins. Set a passphrase to make it yours. Leave it empty and it is sealed with a key built into the app, which anyone with the APK can pull out.
 
 ## Limitations
 
 - Android only.
 - The device has to be in pairing mode. If it already lives in Smart Life, remove it there first.
 - Someone has to hold the phone next to the device.
+- Some camera firmware sends broken ONVIF XML. The app repairs it for its own probe, but Home Assistant's ONVIF integration may still time out on it. Use Generic Camera for those.
 
 ## Tuya security cameras
 
@@ -30,9 +53,11 @@ Stock Tuya Local will take the camera and its controls, but it will not play the
 1. Install stock [Tuya Local](https://github.com/make-all/tuya-local) first. The overlay is only the changed files, not a full integration.
 2. Copy `tuya-local/custom_components/tuya_local/` from this repo over `config/custom_components/tuya_local/` on the Home Assistant machine.
 3. Restart Home Assistant.
-4. Pair the camera in the app.
+4. Pair the camera in the app and pick Tuya Local. The ONVIF streams the scan found are passed along with it.
 
-The username is `admin`. The overlay is based on tuya-local 2026.10.0 and keeps that project's license in `tuya-local/LICENSE.md`. Details in `tuya-local/README.md`. Without it the app still adds the video but as separate Generic Camera entries.
+Cameras that have ONVIF behind Tuya data points get it switched on during pairing, before the scan, so ONVIF and RTSP show up as options too. The default login is `admin`/`admin`; a new ONVIF password can be set from the device screen under Advanced.
+
+The overlay is based on tuya-local 2026.10.0 and keeps that project's license in `tuya-local/LICENSE.md`. Details in `tuya-local/README.md`. Without it, add the video with ONVIF or Generic Camera instead.
 
 ## Build
 
