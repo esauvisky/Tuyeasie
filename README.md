@@ -2,11 +2,11 @@
 
 Tuya will sell you a plug, then charge you a developer account, a cloud project, and a support ticket before it admits the thing has a local key. Tuyeasie skips that. Pair the device from your phone, pick how it goes into Home Assistant, and it lands there, key included. No Smart Life account, no IoT portal, no `tinytuya wizard`.
 
-https://github.com/user-attachments/assets/12284b7a-01b0-45f3-916b-752d80196c42
+https://github.com/user-attachments/assets/b059be73-5cae-42ae-8090-d10219f59be8
 
 ## Download
 
-Grab the APK from [GitHub Releases](https://github.com/esauvisky/Tuyeasie/releases) and install it.
+Grab the APK from [GitHub Reeleases](https://github.com/esauvisky/Tuyeasie/releases) and install it.
 
 ## Set it up
 
