@@ -74,23 +74,6 @@ data class HaIntegrationOption(
     val updatedAt: Long
 )
 
-data class HaFlowField(
-    val name: String,
-    val label: String,
-    val type: String,
-    val required: Boolean,
-    val defaultValue: String?,
-    val options: List<String> = emptyList()
-)
-
-data class HaFlowPrompt(
-    val optionKey: String,
-    val handler: String,
-    val flowId: String,
-    val stepId: String,
-    val fields: List<HaFlowField>
-)
-
 data class HaEntryAssociation(
     val entryId: String,
     val deviceRegistryId: String?,

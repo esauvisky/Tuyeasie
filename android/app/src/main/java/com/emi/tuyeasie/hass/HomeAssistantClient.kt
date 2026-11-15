@@ -6,8 +6,6 @@ import com.alibaba.fastjson.JSONObject
 import com.emi.tuyeasie.data.ActivatedDevice
 import com.emi.tuyeasie.data.Credentials
 import com.emi.tuyeasie.data.HaEntryAssociation
-import com.emi.tuyeasie.data.HaFlowField
-import com.emi.tuyeasie.data.HaFlowPrompt
 import com.emi.tuyeasie.data.HaIntegrationOption
 import com.emi.tuyeasie.data.NetworkReport
 import com.emi.tuyeasie.data.SecureSettingsStore
@@ -22,9 +20,6 @@ import java.io.Closeable
 import java.io.IOException
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
-
-class HomeAssistantFlowPromptException(val prompt: HaFlowPrompt) :
-    RuntimeException("Home Assistant requires additional fields for ${prompt.handler} step ${prompt.stepId}")
 
 enum class ImportOutcome {
     ADDED,
@@ -126,80 +121,6 @@ class HomeAssistantClient(
             } else throw HomeAssistantException(HomeAssistantError.INVALID_FORMAT, "No explicit setup adapter for ${option.key}")
         }
         return entryAssociation(entryId, checkNotNull(option.handler))
-    }
-
-    fun beginSelectedFlow(option: HaIntegrationOption): HaFlowPrompt {
-        val handler = checkNotNull(option.handler) { "Integration option has no flow handler" }
-        val start = postFlow("/api/config/config_entries/flow", mapOf("handler" to handler))
-        if (start.getString("type") == "abort") throw flowFailure(start)
-        if (start.getString("type") == "create_entry") {
-            throw HomeAssistantException(HomeAssistantError.INVALID_RESPONSE, "Handler $handler created an entry without user configuration.")
-        }
-        val flowId = checkNotNull(start.getString("flow_id")) { "Home Assistant returned no flow ID for $handler" }
-        val stepId = checkNotNull(start.getString("step_id")) { "Home Assistant flow did not return a form step" }
-        requireFlowStep(start, stepId)
-        return HaFlowPrompt(option.key, handler, flowId, stepId, readSupportedFlowFields(start))
-    }
-
-    fun cancelSelectedFlow(prompt: HaFlowPrompt) {
-        httpRequest("DELETE", "/api/config/config_entries/flow/${prompt.flowId}", null)
-    }
-
-    fun submitSelectedFlow(prompt: HaFlowPrompt, values: Map<String, Any?>, name: String): HaEntryAssociation {
-        val result = postFlow("/api/config/config_entries/flow/${prompt.flowId}", values)
-        if (result.getString("type") == "create_entry") {
-            val entryId = checkNotNull(result.getJSONObject("result")?.getString("entry_id")) {
-                "Home Assistant created ${prompt.handler} without an entry ID"
-            }
-            openVerifiedSession().use { session ->
-                session.callCommand("config_entries/update", mapOf("entry_id" to entryId, "title" to name))
-                awaitEntryLoaded(session, entryId)
-            }
-            return entryAssociation(entryId, prompt.handler)
-        }
-        if (result.getString("type") == "abort") throw flowFailure(result)
-        val nextStep = checkNotNull(result.getString("step_id")) { "Home Assistant returned a form without a step ID" }
-        requireFlowStep(result, nextStep)
-        throw HomeAssistantFlowPromptException(
-            HaFlowPrompt(prompt.optionKey, prompt.handler, prompt.flowId, nextStep, readSupportedFlowFields(result))
-        )
-    }
-
-    private fun readSupportedFlowFields(form: JSONObject): List<HaFlowField> {
-        val schema = form.getJSONArray("data_schema") ?: throw invalidResponse("Home Assistant flow form has no data schema")
-        return (0 until schema.size).map { index ->
-            val field = schema.getJSONObject(index)
-            val name = checkNotNull(field.getString("name")) { "Home Assistant flow field has no name" }
-            val selector = field.getJSONObject("selector")
-            val selectorKey = selector?.keys?.singleOrNull()
-            val type = when (selectorKey) {
-                "text" -> if (selector.getJSONObject("text")?.getBooleanValue("password") == true) "password" else "string"
-                "boolean" -> "boolean"
-                "number" -> "number"
-                "select" -> "select"
-                else -> field.getString("type") ?: "unsupported"
-            }
-            check(type in setOf("string", "password", "boolean", "integer", "number", "select")) {
-                "Unsupported Home Assistant flow selector for '$name': ${selector?.toJSONString()}"
-            }
-            val options = if (type == "select") {
-                val select = checkNotNull(selector?.getJSONObject("select")) { "Select field '$name' has no selector config" }
-                val values = checkNotNull(select.getJSONArray("options")) { "Select field '$name' has no options" }
-                (0 until values.size).map { optionIndex ->
-                    when (val value = values.get(optionIndex)) {
-                        is String -> value
-                        is JSONObject -> checkNotNull(value.getString("value")) { "Select option has no value" }
-                        else -> error("Unsupported select option type for '$name': ${value.javaClass.name}")
-                    }
-                }
-            } else emptyList()
-            val description = field.getJSONObject("description")
-            // The flow API sends no translated labels, and suggested_value is a prefill, not a label.
-            val label = name.replace('_', ' ')
-            val required = field.getBooleanValue("required")
-            val default = (description?.get("suggested_value") ?: field.get("default"))?.toString()
-            HaFlowField(name, label, type, required, default, options)
-        }
     }
 
     fun testConnection(): Boolean {

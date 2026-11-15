@@ -41,8 +41,4 @@ private fun streamLabel(index: Int) = when (index) {
     else -> "Camera (stream ${index + 1})"
 }
 
-fun supportsDynamicField(field: com.emi.tuyeasie.data.HaFlowField): Boolean =
-    field.type in setOf("string", "password", "boolean", "integer", "number", "select") &&
-        (field.type != "select" || field.options.isNotEmpty())
-
 fun haOptionKeyForStream(index: Int) = if (index == 0) IntegrationKeys.GENERIC else "generic:$index"

@@ -46,7 +46,6 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.alibaba.fastjson.JSON
 import com.emi.tuyeasie.data.CameraOnvifRepository
-import com.emi.tuyeasie.data.HaFlowPrompt
 import com.emi.tuyeasie.data.IntegrationStatus
 import com.emi.tuyeasie.ui.theme.LocalHaBar
 
@@ -133,13 +132,12 @@ private fun HomeAssistantIntegrationsCard(state: OnboardingUiState, viewModel: O
                 when (option.status) {
                     IntegrationStatus.ADDED -> CardAction("Open", { viewModel.openIntegration(option.key, uriHandler::openUri) })
                     IntegrationStatus.ADDING -> Unit
-                    IntegrationStatus.AVAILABLE, IntegrationStatus.FAILED -> CardAction("Add", { viewModel.chooseIntegration(option.key) })
+                    IntegrationStatus.AVAILABLE, IntegrationStatus.FAILED -> CardAction("Add", { viewModel.addIntegration(option.key) })
                 }
             }
         }
         state.scanError?.let { InlineError(it) }
     }
-    state.flowInputPrompt?.let { DynamicFlowDialog(state, it, viewModel) }
     if (state.integrationChooserVisible) IntegrationChooserDialog(state, viewModel)
 }
 
@@ -162,32 +160,6 @@ private fun IntegrationChooserDialog(state: OnboardingUiState, viewModel: Onboar
             }
         },
         dismissButton = { TextButton(onClick = viewModel::dismissIntegrationChooser) { Text("Skip") } }
-    )
-}
-
-@Composable
-private fun DynamicFlowDialog(state: OnboardingUiState, prompt: HaFlowPrompt, viewModel: OnboardingViewModel) {
-    AlertDialog(
-        onDismissRequest = viewModel::cancelFlowPrompt,
-        title = { Text("Add ${prompt.handler}") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                prompt.fields.forEach { field ->
-                    val value = state.flowInputValues[field.name] ?: field.defaultValue.orEmpty()
-                    when (field.type) {
-                        "boolean" -> ChoiceRow(field.label, value.toBoolean()) { viewModel.setFlowField(field.name, (!value.toBoolean()).toString()) }
-                        "select" -> field.options.forEach { option -> ChoiceRow(option, option == value) { viewModel.setFlowField(field.name, option) } }
-                        else -> OutlinedTextField(value, { viewModel.setFlowField(field.name, it) }, label = { Text(field.label) }, singleLine = true,
-                            visualTransformation = if (field.type == "password") PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
-                            keyboardOptions = KeyboardOptions(keyboardType = if (field.type in setOf("integer", "number")) KeyboardType.Number else KeyboardType.Text),
-                            modifier = Modifier.fillMaxWidth())
-                    }
-                }
-                state.flowInputError?.let { InlineError(it) }
-            }
-        },
-        confirmButton = { TextButton(onClick = viewModel::submitFlowPrompt) { Text("Continue") } },
-        dismissButton = { TextButton(onClick = viewModel::cancelFlowPrompt) { Text("Cancel") } }
     )
 }
 

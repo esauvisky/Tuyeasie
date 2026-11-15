@@ -22,7 +22,6 @@ import com.emi.tuyeasie.data.DetectedStream
 import com.emi.tuyeasie.data.DeviceCapabilities
 import com.emi.tuyeasie.data.CountryCodeProvider
 import com.emi.tuyeasie.data.Credentials
-import com.emi.tuyeasie.data.HaFlowPrompt
 import com.emi.tuyeasie.data.HaIntegrationOption
 import com.emi.tuyeasie.data.HaEntryAssociation
 import com.emi.tuyeasie.data.IntegrationKeys
@@ -50,7 +49,6 @@ import com.emi.tuyeasie.data.TuyaSdkException
 import com.emi.tuyeasie.hass.HomeAssistantClient
 import com.emi.tuyeasie.hass.HomeAssistantError
 import com.emi.tuyeasie.hass.HomeAssistantException
-import com.emi.tuyeasie.hass.HomeAssistantFlowPromptException
 import com.emi.tuyeasie.hass.HomeAssistantProtocol
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -114,9 +112,6 @@ data class OnboardingUiState(
     val capabilities: DeviceCapabilities? = null,
     val integrationOptions: List<HaIntegrationOption> = emptyList(),
     val chooserSelection: Set<String> = emptySet(),
-    val flowInputPrompt: HaFlowPrompt? = null,
-    val flowInputValues: Map<String, String> = emptyMap(),
-    val flowInputError: String? = null,
     val manualDataPoints: Map<String, ManualDataPoint> = emptyMap(),
     val scanStatus: ScanStatus = ScanStatus.IDLE,
     val scanProgress: String? = null,
@@ -131,9 +126,6 @@ data class OnboardingUiState(
 private fun OnboardingUiState.withoutDeviceState() = copy(
     integrationChooserVisible = false,
     chooserSelection = emptySet(),
-    flowInputPrompt = null,
-    flowInputValues = emptyMap(),
-    flowInputError = null,
     integrationOptions = emptyList(),
     manualDataPoints = emptyMap(),
     onvifProgress = null,
@@ -1260,86 +1252,10 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         val keys = current.chooserSelection
         check(keys.isNotEmpty()) { "No integration selected" }
         update { copy(integrationChooserVisible = false, chooserSelection = emptySet()) }
-        keys.forEach(::chooseIntegration)
+        keys.forEach(::addIntegration)
     }
-
-    fun setFlowField(name: String, value: String) = update {
-        copy(flowInputValues = flowInputValues + (name to value), flowInputError = null)
-    }
-
-    fun chooseIntegration(key: String) {
-        update { copy(flowInputError = null) }
-        val fixedAdapter = key == IntegrationKeys.TUYA_LOCAL || key == IntegrationKeys.ONVIF ||
-            key == IntegrationKeys.GENERIC || key.startsWith("${IntegrationKeys.GENERIC}:")
-        if (fixedAdapter) addIntegration(key) else beginDynamicFlow(key)
-    }
-
-    private fun beginDynamicFlow(key: String) {
-        val option = current.integrationOptions.single { it.key == key }
-        val adding = option.copy(status = IntegrationStatus.ADDING, error = null, updatedAt = System.currentTimeMillis())
-        updateIntegration(key) { adding }
-        viewModelScope.launch {
-            withContext(Dispatchers.IO) { store.updateIntegrationOption(checkNotNull(current.activatedDevice).deviceId, adding) }
-            try {
-                val prompt = withContext(Dispatchers.IO) { homeAssistantClient.beginSelectedFlow(option) }
-                update { copy(flowInputPrompt = prompt, flowInputValues = flowDefaults(prompt)) }
-            } catch (e: HomeAssistantException) {
-                failIntegration(key, e.publicMessage)
-            }
-        }
-    }
-
-    private fun flowDefaults(prompt: HaFlowPrompt): Map<String, String> =
-        prompt.fields.mapNotNull { field -> field.defaultValue?.let { field.name to it } }.toMap()
 
     fun consumeNotice() = update { copy(notice = null) }
-
-    fun cancelFlowPrompt() {
-        val prompt = checkNotNull(current.flowInputPrompt) { "No Home Assistant flow prompt is active" }
-        viewModelScope.launch {
-            withContext(Dispatchers.IO) { homeAssistantClient.cancelSelectedFlow(prompt) }
-            val option = current.integrationOptions.single { it.key == prompt.optionKey }
-                .copy(status = IntegrationStatus.AVAILABLE, error = null, updatedAt = System.currentTimeMillis())
-            withContext(Dispatchers.IO) { store.updateIntegrationOption(checkNotNull(current.activatedDevice).deviceId, option) }
-            updateIntegration(prompt.optionKey) { option }
-            update { copy(flowInputPrompt = null, flowInputValues = emptyMap(), flowInputError = null) }
-        }
-    }
-
-    fun submitFlowPrompt() {
-        val prompt = checkNotNull(current.flowInputPrompt) { "No integration flow prompt is active" }
-        val values = linkedMapOf<String, Any?>()
-        for (field in prompt.fields) {
-            val text = current.flowInputValues[field.name] ?: field.defaultValue.orEmpty()
-            if (field.required && text.isBlank()) {
-                update { copy(flowInputError = "${field.label} is required.") }
-                return
-            }
-            if (text.isEmpty() && !field.required) continue
-            values[field.name] = when (field.type) {
-                "boolean" -> text.toBooleanStrict()
-                "integer" -> text.toInt()
-                "number" -> text.toDouble()
-                "select" -> text.also { check(it in field.options) { "Unsupported selection for ${field.label}" } }
-                "string", "password" -> text
-                else -> error("Unsupported Home Assistant field type ${field.type}")
-            }
-        }
-        viewModelScope.launch {
-            try {
-                val association = withContext(Dispatchers.IO) {
-                    homeAssistantClient.submitSelectedFlow(prompt, values, checkNotNull(current.activatedDevice).name)
-                }
-                persistIntegrationSuccess(prompt.optionKey, association)
-                update { copy(flowInputPrompt = null, flowInputValues = emptyMap(), flowInputError = null) }
-            } catch (e: HomeAssistantFlowPromptException) {
-                update { copy(flowInputPrompt = e.prompt, flowInputValues = flowDefaults(e.prompt)) }
-            } catch (e: HomeAssistantException) {
-                failIntegration(prompt.optionKey, e.publicMessage)
-                update { copy(flowInputError = e.publicMessage) }
-            }
-        }
-    }
 
     fun addIntegration(key: String) {
         val option = current.integrationOptions.single { it.key == key }
