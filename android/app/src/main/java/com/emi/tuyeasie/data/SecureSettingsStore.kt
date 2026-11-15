@@ -236,9 +236,8 @@ class SecureSettingsStore(context: Context) {
     fun loadCapabilities(deviceId: String): DeviceCapabilities? {
         val raw = preferences.getString(KEY_CAPABILITIES_PREFIX + deviceId, null) ?: return null
         val json = JSONObject(raw)
-        val points = json.getJSONObject("dataPoints")
         return DeviceCapabilities(
-            dataPoints = points.keys().asSequence().associateWith { points.getString(it) },
+            dataPoints = readDataPointSchemas(json),
             mac = if (json.isNull("mac")) null else json.getString("mac"),
             tuyaLan = json.getBoolean("tuyaLan")
         )
@@ -246,7 +245,7 @@ class SecureSettingsStore(context: Context) {
 
     fun saveCapabilities(deviceId: String, capabilities: DeviceCapabilities) {
         val json = JSONObject()
-            .put("dataPoints", JSONObject(capabilities.dataPoints))
+            .put("dataPoints", writeDataPointSchemas(capabilities.dataPoints))
             .put("mac", capabilities.mac ?: JSONObject.NULL)
             .put("tuyaLan", capabilities.tuyaLan)
         val committed = preferences.edit().putString(KEY_CAPABILITIES_PREFIX + deviceId, json.toString()).commit()
@@ -325,6 +324,39 @@ class SecureSettingsStore(context: Context) {
         .put("openUrl", option.openUrl ?: JSONObject.NULL)
         .put("error", option.error ?: JSONObject.NULL)
         .put("updatedAt", option.updatedAt)
+
+    private fun writeDataPointSchemas(points: List<TuyaDataPointSchema>) = JSONArray(points.map {
+        JSONObject()
+            .put("id", it.id)
+            .put("code", it.code)
+            .put("name", it.name)
+            .put("mode", it.mode)
+            .put("type", it.type)
+            .put("propertyJson", it.propertyJson)
+            .put("schemaType", it.schemaType)
+    })
+
+    private fun readDataPointSchemas(json: JSONObject): List<TuyaDataPointSchema> {
+        val raw = json.get("dataPoints")
+        if (raw is JSONObject) {
+            return raw.keys().asSequence().map { code ->
+                TuyaDataPointSchema(raw.getString(code), code, code, "ro", "unknown", "{}", "")
+            }.toList()
+        }
+        val points = raw as JSONArray
+        return (0 until points.length()).map { index ->
+            val point = points.getJSONObject(index)
+            TuyaDataPointSchema(
+                id = point.getString("id"),
+                code = point.getString("code"),
+                name = point.getString("name"),
+                mode = point.getString("mode"),
+                type = point.getString("type"),
+                propertyJson = point.getString("propertyJson"),
+                schemaType = point.getString("schemaType")
+            )
+        }
+    }
 
     fun loadNetworkReport(deviceId: String): NetworkReport? {
         val raw = preferences.getString(KEY_NETWORK_PREFIX + deviceId, null) ?: return null
@@ -412,9 +444,9 @@ class SecureSettingsStore(context: Context) {
             val deviceId = obj.getString("deviceId")
             val name = obj.getString("name")
             val productId = obj.getString("productId")
-            val points = obj.getJSONObject("dataPoints")
+            val points = readDataPointSchemas(obj)
             val capabilities = DeviceCapabilities(
-                dataPoints = points.keys().asSequence().associateWith { points.getString(it) },
+                dataPoints = points,
                 mac = obj.optText("mac"),
                 tuyaLan = obj.getBoolean("tuyaLan")
             )
@@ -452,7 +484,7 @@ class SecureSettingsStore(context: Context) {
                 .put("protocolVersion", device.activated.protocolVersion.orNull())
                 .put("category", device.activated.category.orNull())
                 .put("ip", device.activated.ip.orNull())
-                .put("dataPoints", JSONObject(device.capabilities.dataPoints))
+                .put("dataPoints", writeDataPointSchemas(device.capabilities.dataPoints))
                 .put("mac", device.capabilities.mac.orNull())
                 .put("tuyaLan", device.capabilities.tuyaLan)
         })

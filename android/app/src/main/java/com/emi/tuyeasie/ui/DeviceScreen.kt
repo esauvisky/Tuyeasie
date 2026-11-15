@@ -44,6 +44,7 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import com.alibaba.fastjson.JSON
 import com.emi.tuyeasie.data.CameraOnvifRepository
 import com.emi.tuyeasie.data.HaFlowPrompt
 import com.emi.tuyeasie.data.IntegrationStatus
@@ -92,6 +93,7 @@ fun DeviceScreen(state: OnboardingUiState, viewModel: OnboardingViewModel, iconU
             HomeAssistantIntegrationsCard(state, viewModel, onOpenSettings)
             NetworkCard(state, viewModel)
             DetailsCard(state, viewModel)
+            DataPointsCard(state, viewModel)
             AdvancedCard(state, viewModel)
         }
     }
@@ -225,11 +227,47 @@ private fun DetailsCard(state: OnboardingUiState, viewModel: OnboardingViewModel
             device.protocolVersion?.let { CopyField("Protocol version", it) { copy("Tuya protocol version", it) } }
             device.category?.let { CopyField("Category", it) { copy("Tuya category", it) } }
         }
-        state.capabilities?.let { capabilities ->
-            Disclosure("Data points (${capabilities.dataPoints.size})") {
-                capabilities.dataPoints.entries.sortedBy { it.value.toInt() }.forEach { (code, id) ->
-                    Text("$id  $code", style = MaterialTheme.typography.bodyMedium)
+    }
+}
+
+@Composable
+private fun DataPointsCard(state: OnboardingUiState, viewModel: OnboardingViewModel) {
+    val capabilities = checkNotNull(state.capabilities) { "Data point card without device schema" }
+    HaCard(title = "Data points", actions = { CardAction("Read all", viewModel::refreshDataPoints) }) {
+        if (capabilities.dataPoints.isEmpty()) CardText("No Tuya data points were reported for this device.")
+        capabilities.dataPoints.forEach { schema ->
+            val point = checkNotNull(state.manualDataPoints[schema.id]) { "No state for data point ${schema.id}" }
+            var value by remember(schema.id, point.value) { mutableStateOf(point.value?.toString().orEmpty()) }
+            EntityRow(icon = { EntityIcon(categoryIcon(state.activatedDevice?.category), if (point.error != null) RowTone.FAILED else RowTone.NEUTRAL, busy = point.reading || point.writing) },
+                title = "${schema.name} · ${schema.code}",
+                state = "DP ${schema.id} · ${schema.type} · ${if (schema.writable) "read/write" else "read-only"}\n${point.error ?: point.value?.toString() ?: "Not read"}",
+                tone = if (point.error != null) RowTone.FAILED else RowTone.NEUTRAL) {
+                CardAction("Read", { viewModel.readDataPoint(schema.id) }, enabled = !point.reading && !point.writing)
+            }
+            val editorType = schema.editorType
+            when (editorType) {
+                "boolean" -> ChoiceRow("${schema.name}: $value", value == "true") { value = (value != "true").toString() }
+                "enum" -> {
+                    val range = JSON.parseObject(schema.propertyJson).getJSONArray("range")
+                    Column(Modifier.padding(start = 16.dp)) {
+                        (0 until range.size).forEach { index ->
+                            val option = range.getString(index)
+                            ChoiceRow(option, option == value) { value = option }
+                        }
+                    }
                 }
+                "integer", "number", "string" -> OutlinedTextField(
+                    value = value,
+                    onValueChange = { value = it },
+                    label = { Text(schema.name) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = if (editorType == "integer" || editorType == "number") KeyboardType.Number else KeyboardType.Text),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+                )
+                null -> if (schema.writable) CardText("This writable schema has no supported editor and is read-only in Tuyeasie.")
+            }
+            if (editorType != null) Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.End) {
+                CardAction("Set", { viewModel.setDataPoint(schema.id, value) }, enabled = !point.reading && !point.writing)
             }
         }
     }

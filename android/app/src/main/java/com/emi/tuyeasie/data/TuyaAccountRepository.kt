@@ -38,7 +38,17 @@ fun deviceCapabilities(bean: com.thingclips.smart.sdk.bean.DeviceBean): DeviceCa
         "Tuya SDK has no schema for ${bean.devId}"
     }
     return DeviceCapabilities(
-        dataPoints = schema.values.associate { it.code to it.id },
+        dataPoints = schema.values.map {
+            TuyaDataPointSchema(
+                id = it.id,
+                code = it.code,
+                name = it.name,
+                mode = it.mode,
+                type = it.type,
+                propertyJson = it.property,
+                schemaType = it.schemaType
+            )
+        },
         mac = bean.mac,
         tuyaLan = bean.isHasLanCommunication()
     )

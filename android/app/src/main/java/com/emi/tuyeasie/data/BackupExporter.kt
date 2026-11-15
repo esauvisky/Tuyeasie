@@ -83,7 +83,10 @@ class BackupExporter(private val store: SecureSettingsStore) {
                         .put("verified", it.verified)
                         .put("capabilities", store.loadCapabilities(it.deviceId)?.let {
                             JSONObject()
-                                .put("dataPoints", JSONObject(it.dataPoints))
+                                .put("dataPoints", JSONArray(it.dataPoints.map { dp ->
+                                    JSONObject().put("id", dp.id).put("code", dp.code).put("name", dp.name).put("mode", dp.mode)
+                                        .put("type", dp.type).put("propertyJson", dp.propertyJson).put("schemaType", dp.schemaType)
+                                }))
                                 .put("mac", it.mac ?: JSONObject.NULL)
                                 .put("tuyaLan", it.tuyaLan)
                         } ?: JSONObject.NULL)

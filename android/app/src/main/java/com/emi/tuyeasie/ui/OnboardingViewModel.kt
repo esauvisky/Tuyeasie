@@ -31,6 +31,7 @@ import com.emi.tuyeasie.data.IntegrationStatus
 import com.emi.tuyeasie.data.HotspotRepository
 import com.emi.tuyeasie.data.NearbyNetwork
 import com.emi.tuyeasie.data.NetworkReport
+import com.emi.tuyeasie.data.ManualDataPoint
 import com.emi.tuyeasie.data.OnvifClient
 import com.emi.tuyeasie.data.OnvifDiscovery
 import com.emi.tuyeasie.data.OnvifException
@@ -54,7 +55,10 @@ import com.emi.tuyeasie.hass.HomeAssistantProtocol
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicLong
 
@@ -113,6 +117,7 @@ data class OnboardingUiState(
     val flowInputPrompt: HaFlowPrompt? = null,
     val flowInputValues: Map<String, String> = emptyMap(),
     val flowInputError: String? = null,
+    val manualDataPoints: Map<String, ManualDataPoint> = emptyMap(),
     val scanStatus: ScanStatus = ScanStatus.IDLE,
     val scanProgress: String? = null,
     val scanError: String? = null,
@@ -130,6 +135,7 @@ private fun OnboardingUiState.withoutDeviceState() = copy(
     flowInputValues = emptyMap(),
     flowInputError = null,
     integrationOptions = emptyList(),
+    manualDataPoints = emptyMap(),
     onvifProgress = null,
     onvifStatus = OnvifStatus.IDLE,
     onvifError = null,
@@ -150,6 +156,8 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     private val onvifRepository = CameraOnvifRepository(application)
     private val accountRepository by lazy { TuyaAccountRepository(application, store) }
     private val addressResolver = DeviceAddressResolver(application)
+    private val sdkLock = kotlinx.coroutines.sync.Mutex()
+    private var activeTuyaAccount: TuyaAccount? = null
     private val _uiState = kotlinx.coroutines.flow.MutableStateFlow(OnboardingUiState())
     private val importGeneration = AtomicLong(0)
     private val scanGeneration = AtomicLong(0)
@@ -493,9 +501,11 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         pendingCameraAccount = null
         pendingAfterReady = null
         pendingLookupUuid = null
+        val account = store.loadOrCreateTuyaAccount()
+        activeTuyaAccount = account
         activationRepository.prepare(
             CountryCodeProvider.current(getApplication()),
-            store.loadOrCreateTuyaAccount(),
+            account,
             AccountAuth.LOGIN_OR_REGISTER
         )
         bleRepository.stop()
@@ -655,6 +665,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 hotspotError = null
             )
         }
+        activeTuyaAccount = account
         activationRepository.prepare(CountryCodeProvider.current(getApplication()), account, auth)
     }
 
@@ -802,7 +813,9 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    fun openDeviceSetup(device: ActivatedDevice, capabilities: DeviceCapabilities) {
+    fun openDeviceSetup(device: ActivatedDevice, capabilities: DeviceCapabilities, account: TuyaAccount? = null) {
+        activeTuyaAccount = account
+
         store.saveCapabilities(device.deviceId, capabilities)
         val existing = store.loadOnvifRecord(device.deviceId)
         val options = store.loadIntegrationOptions(device.deviceId)
@@ -813,6 +826,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 capabilities = capabilities,
                 integrationOptions = options,
                 networkReport = store.loadNetworkReport(device.deviceId),
+                manualDataPoints = capabilities.dataPoints.associate { it.id to ManualDataPoint(it.id, null) },
                 onvifRecord = existing,
                 onvifStatus = if (existing?.verified == true) OnvifStatus.COMPLETE else OnvifStatus.IDLE,
                 onvifError = if (existing != null && !existing.verified) UNVERIFIED_ONVIF_MESSAGE else null,
@@ -824,6 +838,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         }
         viewModelScope.launch {
             if (current.networkReport == null) rescanNetwork()
+            refreshDataPoints()
         }
     }
 
@@ -942,7 +957,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 copy(activatedDevice = resolved, capabilities = capabilities, onvifRecord = onvif,
                     onvifStatus = when { onvifError != null -> OnvifStatus.FAILED; onvif != null -> OnvifStatus.COMPLETE; else -> OnvifStatus.IDLE },
                     onvifError = onvifError, activationStatus = ActivationStatus.COMPLETE, activationProgress = null,
-                    deviceScreenOpen = true)
+                    deviceScreenOpen = true, manualDataPoints = capabilities.dataPoints.associate { it.id to ManualDataPoint(it.id, null) })
             }
             resetPairing()
             if (address == null) {
@@ -1403,6 +1418,121 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         val option = current.integrationOptions.single { it.key == key }
         check(option.status == IntegrationStatus.ADDED) { "$key is not added to Home Assistant" }
         open(checkNotNull(option.openUrl) { "Added integration has no Home Assistant URL" })
+    }
+
+    fun refreshDataPoints() {
+        val device = checkNotNull(current.activatedDevice) { "No device is open" }
+        val ids = checkNotNull(current.capabilities) { "No device schema is loaded" }.dataPoints.map { it.id }
+        if (ids.isEmpty()) return
+        viewModelScope.launch {
+            ids.forEach { id -> updateDataPoint(id) { it.copy(reading = true, error = null) } }
+            try {
+                val values = withContext(Dispatchers.IO) { readDeviceDataPoints(device, ids) }
+                ids.forEach { id -> updateDataPoint(id) { it.copy(value = values[id], reading = false) } }
+            } catch (e: com.emi.tuyeasie.data.TuyaSdkException) {
+                ids.forEach { id -> updateDataPoint(id) { it.copy(reading = false, error = e.message) } }
+            }
+        }
+    }
+
+    fun setDataPoint(id: String, raw: String) {
+        val device = checkNotNull(current.activatedDevice) { "No device is open" }
+        val schema = checkNotNull(current.capabilities) { "No device schema is loaded" }.dataPointById(id)
+        check(schema.writable) { "Data point $id is not writable" }
+        val value = parseDataPointValue(schema, raw)
+        updateDataPoint(id) { it.copy(writing = true, error = null) }
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) { publishDataPoint(device, id, value) }
+                updateDataPoint(id) { it.copy(value = value, writing = false) }
+                readDataPoint(id)
+            } catch (e: com.emi.tuyeasie.data.TuyaSdkException) {
+                updateDataPoint(id) { it.copy(writing = false, error = e.message) }
+            }
+        }
+    }
+
+    fun readDataPoint(id: String) {
+        val device = checkNotNull(current.activatedDevice) { "No device is open" }
+        checkNotNull(current.capabilities).dataPointById(id)
+        updateDataPoint(id) { it.copy(reading = true, error = null) }
+        viewModelScope.launch {
+            try {
+                val value = withContext(Dispatchers.IO) { readDeviceDataPoints(device, listOf(id))[id] }
+                updateDataPoint(id) { it.copy(value = value, reading = false) }
+            } catch (e: com.emi.tuyeasie.data.TuyaSdkException) {
+                updateDataPoint(id) { it.copy(reading = false, error = e.message) }
+            }
+        }
+    }
+
+    private suspend fun readDeviceDataPoints(device: ActivatedDevice, ids: List<String>): Map<String, Any?> =
+        sdkLock.withLock {
+            check(ids.isNotEmpty()) { "At least one data-point ID is required" }
+            val account = checkNotNull(activeTuyaAccount) { "No Tuya account owns this device session" }
+            accountRepository.signIn(account)
+            val sdk = com.thingclips.smart.home.sdk.ThingHomeSdk.newDeviceInstance(device.deviceId)
+            awaitDataPointResult("Read data points", sdk) { callback -> sdk.getDpList(ids, callback) }
+            val values = checkNotNull(com.thingclips.smart.home.sdk.ThingHomeSdk.getDataInstance().getDeviceBean(device.deviceId)) {
+                "Tuya SDK has no device bean for ${device.deviceId}"
+            }.dps
+            // DPs the device has never reported are absent from the bean.
+            ids.associateWith { id -> values[id] }
+        }
+
+    private suspend fun publishDataPoint(device: ActivatedDevice, id: String, value: Any) = sdkLock.withLock {
+        val account = checkNotNull(activeTuyaAccount) { "No Tuya account owns this device session" }
+        accountRepository.signIn(account)
+        val sdk = com.thingclips.smart.home.sdk.ThingHomeSdk.newDeviceInstance(device.deviceId)
+        val payload = com.alibaba.fastjson.JSON.toJSONString(mapOf(id to value))
+        awaitDataPointResult("Set data point $id", sdk) { callback -> sdk.publishDps(payload, callback) }
+    }
+
+    private suspend fun awaitDataPointResult(
+        stage: String,
+        sdk: com.thingclips.smart.sdk.api.IThingDevice,
+        start: (com.thingclips.smart.sdk.api.IResultCallback) -> Unit
+    ) = kotlinx.coroutines.suspendCancellableCoroutine<Unit> { continuation ->
+        start(object : com.thingclips.smart.sdk.api.IResultCallback {
+            override fun onSuccess() {
+                continuation.resume(Unit)
+            }
+            override fun onError(code: String, error: String?) {
+                continuation.resumeWithException(com.emi.tuyeasie.data.TuyaSdkException(stage, code, error.orEmpty()))
+            }
+        })
+    }
+
+
+    private fun updateDataPoint(id: String, transform: (ManualDataPoint) -> ManualDataPoint) = update {
+        val state = manualDataPoints[id] ?: error("No displayed state for data point $id")
+        copy(manualDataPoints = manualDataPoints + (id to transform(state)))
+    }
+
+    private fun parseDataPointValue(schema: com.emi.tuyeasie.data.TuyaDataPointSchema, raw: String): Any {
+        check(schema.writable) { "Data point ${schema.id} is read-only" }
+        val property = com.alibaba.fastjson.JSON.parseObject(schema.propertyJson)
+        return when (schema.editorType) {
+            "boolean" -> raw.toBooleanStrict()
+            "enum" -> raw.also { value ->
+                val range = checkNotNull(property.getJSONArray("range")) { "Enum DP ${schema.id} has no range" }
+                check((0 until range.size).any { range.getString(it) == value }) { "Value is not in the declared range" }
+            }
+            "integer" -> raw.toInt().also { number ->
+                val min = property.getInteger("min")
+                val max = property.getInteger("max")
+                check(min == null || number >= min) { "Value is below minimum $min" }
+                check(max == null || number <= max) { "Value is above maximum $max" }
+            }
+            "number" -> raw.toDouble().also { number ->
+                val min = property.getDouble("min")
+                val max = property.getDouble("max")
+                check(min == null || number >= min) { "Value is below minimum $min" }
+                check(max == null || number <= max) { "Value is above maximum $max" }
+            }
+            "string" -> raw
+            else -> error("Data point ${schema.id} has no supported editor")
+        }
     }
 
     private fun accountSecrets(): Array<String?> = arrayOf(

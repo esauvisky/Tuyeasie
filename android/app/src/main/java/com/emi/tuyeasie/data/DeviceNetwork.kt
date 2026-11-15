@@ -1,18 +1,52 @@
 package com.emi.tuyeasie.data
 
-/**
- * What the Tuya cloud says the device can do.
- * [dataPoints] maps data point codes (e.g. "onvif_switch") to their IDs, which differ between models.
- */
+import com.alibaba.fastjson.JSON
+import com.alibaba.fastjson.JSONException
+
+/** A Tuya DP schema item. The raw property JSON is retained so controls can be derived without lossy parsing. */
+data class TuyaDataPointSchema(
+    val id: String,
+    val code: String,
+    val name: String,
+    val mode: String,
+    val type: String,
+    val propertyJson: String,
+    val schemaType: String
+) {
+    val writable: Boolean
+        get() = mode.equals("rw", ignoreCase = true)
+
+    val editorType: String?
+        get() {
+            if (!writable) return null
+            val property = try {
+                JSON.parseObject(propertyJson)
+            } catch (e: JSONException) {
+                return null
+            }
+            return when (type.lowercase()) {
+                "bool", "boolean" -> "boolean"
+                "enum" -> if (property.getJSONArray("range") != null) "enum" else null
+                "integer", "int" -> if (property.containsKey("min") && property.containsKey("max")) "integer" else null
+                "value", "number", "float", "decimal" -> if (property.containsKey("min") && property.containsKey("max")) "number" else null
+                "string" -> "string"
+                else -> null
+            }
+        }
+}
+
 data class DeviceCapabilities(
-    val dataPoints: Map<String, String>,
+    val dataPoints: List<TuyaDataPointSchema>,
     val mac: String?,
     val tuyaLan: Boolean
 ) {
     val tuyaOnvif: Boolean
-        get() = TUYA_ONVIF_CODES.all { it in dataPoints }
+        get() = TUYA_ONVIF_CODES.all { code -> dataPoints.any { it.code == code } }
     val supportsTuyaLocal: Boolean
         get() = tuyaLan && dataPoints.isNotEmpty()
+
+    fun dataPointById(id: String): TuyaDataPointSchema = dataPoints.single { it.id == id }
+    fun dataPointByCode(code: String): TuyaDataPointSchema = dataPoints.single { it.code == code }
 
     companion object {
         val TUYA_ONVIF_CODES = listOf(
@@ -66,6 +100,13 @@ data class HaEntryAssociation(
     val openUrl: String
 )
 
+data class ManualDataPoint(
+    val id: String,
+    val value: Any?,
+    val reading: Boolean = false,
+    val writing: Boolean = false,
+    val error: String? = null
+)
 
 data class OpenPort(
     val port: Int,

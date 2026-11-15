@@ -140,7 +140,7 @@ class MainActivity : ComponentActivity() {
                             configureEnabled = !state.busy,
                             onConfigureDevice = { account, device ->
                                 deviceSource = account to device
-                                viewModel.openDeviceSetup(device.activated, device.capabilities)
+                                viewModel.openDeviceSetup(device.activated, device.capabilities, account.account)
                             },
                             padding = padding
                         )
