@@ -1319,12 +1319,12 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         val ids = checkNotNull(current.capabilities) { "No device schema is loaded" }.dataPoints.map { it.id }
         if (ids.isEmpty()) return
         viewModelScope.launch {
-            ids.forEach { id -> updateDataPoint(id) { it.copy(reading = true, error = null) } }
+            ids.forEach { id -> updateDataPoint(device.deviceId, id) { it.copy(reading = true, error = null) } }
             try {
                 val values = withContext(Dispatchers.IO) { readDeviceDataPoints(device, ids) }
-                ids.forEach { id -> updateDataPoint(id) { it.copy(value = values[id], reading = false) } }
+                ids.forEach { id -> updateDataPoint(device.deviceId, id) { it.copy(value = values[id], reading = false) } }
             } catch (e: com.emi.tuyeasie.data.TuyaSdkException) {
-                ids.forEach { id -> updateDataPoint(id) { it.copy(reading = false, error = e.message) } }
+                ids.forEach { id -> updateDataPoint(device.deviceId, id) { it.copy(reading = false, error = e.message) } }
             }
         }
     }
@@ -1334,14 +1334,14 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         val schema = checkNotNull(current.capabilities) { "No device schema is loaded" }.dataPointById(id)
         check(schema.writable) { "Data point $id is not writable" }
         val value = parseDataPointValue(schema, raw)
-        updateDataPoint(id) { it.copy(writing = true, error = null) }
+        updateDataPoint(device.deviceId, id) { it.copy(writing = true, error = null) }
         viewModelScope.launch {
             try {
                 withContext(Dispatchers.IO) { publishDataPoint(device, id, value) }
-                updateDataPoint(id) { it.copy(value = value, writing = false) }
-                readDataPoint(id)
+                updateDataPoint(device.deviceId, id) { it.copy(value = value, writing = false) }
+                if (current.activatedDevice?.deviceId == device.deviceId) readDataPoint(id)
             } catch (e: com.emi.tuyeasie.data.TuyaSdkException) {
-                updateDataPoint(id) { it.copy(writing = false, error = e.message) }
+                updateDataPoint(device.deviceId, id) { it.copy(writing = false, error = e.message) }
             }
         }
     }
@@ -1349,13 +1349,13 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     fun readDataPoint(id: String) {
         val device = checkNotNull(current.activatedDevice) { "No device is open" }
         checkNotNull(current.capabilities).dataPointById(id)
-        updateDataPoint(id) { it.copy(reading = true, error = null) }
+        updateDataPoint(device.deviceId, id) { it.copy(reading = true, error = null) }
         viewModelScope.launch {
             try {
                 val value = withContext(Dispatchers.IO) { readDeviceDataPoints(device, listOf(id))[id] }
-                updateDataPoint(id) { it.copy(value = value, reading = false) }
+                updateDataPoint(device.deviceId, id) { it.copy(value = value, reading = false) }
             } catch (e: com.emi.tuyeasie.data.TuyaSdkException) {
-                updateDataPoint(id) { it.copy(reading = false, error = e.message) }
+                updateDataPoint(device.deviceId, id) { it.copy(reading = false, error = e.message) }
             }
         }
     }
@@ -1398,7 +1398,9 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     }
 
 
-    private fun updateDataPoint(id: String, transform: (ManualDataPoint) -> ManualDataPoint) = update {
+    // A read or write outlives the screen it started on; once another device (or none) is open, its result is stale.
+    private fun updateDataPoint(deviceId: String, id: String, transform: (ManualDataPoint) -> ManualDataPoint) = update {
+        if (activatedDevice?.deviceId != deviceId) return@update this
         val state = manualDataPoints[id] ?: error("No displayed state for data point $id")
         copy(manualDataPoints = manualDataPoints + (id to transform(state)))
     }
