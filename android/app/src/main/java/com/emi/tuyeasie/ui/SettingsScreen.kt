@@ -64,23 +64,6 @@ fun SettingsScreen(
         }
         AccountsCard(devicesViewModel)
         BackupCard(devicesViewModel)
-        HaCard(title = "Camera feeds") {
-            CardText("Where new camera feeds go in Home Assistant. Each camera can override it on its device screen. " +
-                "Only options that device actually has are offered: ONVIF needs a detected ONVIF service, and Tuya Local needs a Tuya Local entry.")
-            Column(Modifier.padding(horizontal = 12.dp)) {
-                StreamDestination.entries.forEach { destination ->
-                    ChoiceRow(destinationLabel(destination), state.settings.feedDestination == destination.storedName) {
-                        viewModel.selectDefaultDestination(destination)
-                    }
-                }
-            }
-            if (state.settings.feedDestination == StreamDestination.GO2RTC.storedName) {
-                Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) { Go2rtcFields(state, viewModel) }
-            }
-            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.End) {
-                CardAction("Save", viewModel::saveFeedSettings)
-            }
-        }
     }
 }
 

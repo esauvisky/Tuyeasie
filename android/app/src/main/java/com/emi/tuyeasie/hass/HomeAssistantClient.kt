@@ -4,6 +4,12 @@ import com.alibaba.fastjson.JSON
 import com.alibaba.fastjson.JSONException
 import com.alibaba.fastjson.JSONObject
 import com.emi.tuyeasie.data.ActivatedDevice
+import com.emi.tuyeasie.data.Credentials
+import com.emi.tuyeasie.data.HaEntryAssociation
+import com.emi.tuyeasie.data.HaFlowField
+import com.emi.tuyeasie.data.HaFlowPrompt
+import com.emi.tuyeasie.data.HaIntegrationOption
+import com.emi.tuyeasie.data.NetworkReport
 import com.emi.tuyeasie.data.SecureSettingsStore
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -16,6 +22,9 @@ import java.io.Closeable
 import java.io.IOException
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+
+class HomeAssistantFlowPromptException(val prompt: HaFlowPrompt) :
+    RuntimeException("Home Assistant requires additional fields for ${prompt.handler} step ${prompt.stepId}")
 
 enum class ImportOutcome {
     ADDED,
@@ -56,6 +65,148 @@ class HomeAssistantClient(
     private val settingsStore: SecureSettingsStore,
     private val httpClient: OkHttpClient = DEFAULT_HTTP_CLIENT
 ) {
+
+    fun availableFlowHandlers(): Set<String> {
+        val response = httpRequest("GET", "/api/config/config_entries/flow_handlers", null)
+        val handlers = try {
+            JSON.parseArray(response)
+        } catch (e: JSONException) {
+            throw HomeAssistantException(HomeAssistantError.INVALID_RESPONSE, "Home Assistant returned an invalid flow handler list.", e)
+        } ?: throw invalidResponse("Home Assistant returned no flow handler list.")
+        return (0 until handlers.size).map { index -> handlers.getString(index) }.toSet()
+    }
+
+    fun entryAssociation(entryId: String, domain: String): HaEntryAssociation {
+        val session = openVerifiedSession()
+        session.use {
+            val entries = session.callCommand("config/device_registry/list").getJSONArray("result")
+                ?: throw invalidResponse("Home Assistant returned no device registry.")
+            val device = (0 until entries.size)
+                .map { entries.getJSONObject(it) }
+                .firstOrNull { candidate ->
+                    val configEntries = candidate.getJSONArray("config_entries")
+                        ?: throw invalidResponse("A Home Assistant device has no config entries.")
+                    (0 until configEntries.size).any { configEntries.getString(it) == entryId }
+                }
+            val registryId = device?.getString("id")
+            val openUrl = if (registryId != null) {
+                settingsStore.loadSettings().hassUrl.trimEnd('/') + "/config/devices/device/$registryId"
+            } else {
+                settingsStore.loadSettings().hassUrl.trimEnd('/') + "/config/integrations/integration/$domain#config_entry=$entryId"
+            }
+            return HaEntryAssociation(entryId, registryId, openUrl)
+        }
+    }
+
+    fun dynamicFlowAvailable(option: HaIntegrationOption, handlers: Set<String>): Boolean =
+        option.enabled && option.handler != null && option.handler in handlers
+
+    fun addIntegration(option: HaIntegrationOption, device: ActivatedDevice, report: NetworkReport, credentials: Credentials?): HaEntryAssociation {
+        check(option.enabled) { option.unavailableReason ?: "Integration is not available" }
+        val entryId = when (option.key) {
+            "tuya_local" -> importDevice(
+                device.copy(ip = checkNotNull(report.ip) { "Tuya Local needs a LAN address" }),
+                report.onvif?.streams?.firstOrNull()?.url,
+                report.onvif?.streams?.getOrNull(1)?.url
+            ).entryId
+            "onvif" -> {
+                val service = checkNotNull(report.onvif) { "No ONVIF service probe result is available" }
+                val uri = java.net.URI(service.serviceUrl)
+                createOnvifEntry(device.name, uri.host, if (uri.port == -1) 80 else uri.port,
+                    credentials?.username ?: "admin", credentials?.password ?: "admin")
+            }
+            "generic" -> {
+                val streams = report.onvif?.streams.orEmpty().ifEmpty { report.portScanStreams }
+                check(streams.isNotEmpty()) { "No verified RTSP stream was detected" }
+                val used = credentials ?: report.onvif?.credentials ?: Credentials.DEFAULT
+                createCamera(device.name, streams.first().url, used.username, used.password)
+            }
+            else -> if (option.key.startsWith("generic:")) {
+                val streams = report.onvif?.streams.orEmpty().ifEmpty { report.portScanStreams }
+                val index = option.key.substringAfter(':').toInt()
+                val stream = checkNotNull(streams.getOrNull(index)) { "No verified RTSP stream at index $index" }
+                val used = credentials ?: report.onvif?.credentials ?: Credentials.DEFAULT
+                createCamera("${device.name} ${stream.name}", stream.url, used.username, used.password)
+            } else throw HomeAssistantException(HomeAssistantError.INVALID_FORMAT, "No explicit setup adapter for ${option.key}")
+        }
+        return entryAssociation(entryId, checkNotNull(option.handler))
+    }
+
+    fun beginSelectedFlow(option: HaIntegrationOption): HaFlowPrompt {
+        check(option.enabled) { option.unavailableReason ?: "Integration is not available" }
+        val handler = checkNotNull(option.handler) { "Integration option has no flow handler" }
+        val start = postFlow("/api/config/config_entries/flow", mapOf("handler" to handler))
+        if (start.getString("type") == "abort") throw flowFailure(start)
+        if (start.getString("type") == "create_entry") {
+            throw HomeAssistantException(HomeAssistantError.INVALID_RESPONSE, "Handler $handler created an entry without user configuration.")
+        }
+        val flowId = checkNotNull(start.getString("flow_id")) { "Home Assistant returned no flow ID for $handler" }
+        val stepId = checkNotNull(start.getString("step_id")) { "Home Assistant flow did not return a form step" }
+        requireFlowStep(start, stepId)
+        return HaFlowPrompt(option.key, handler, flowId, stepId, readSupportedFlowFields(start))
+    }
+
+    fun cancelSelectedFlow(prompt: HaFlowPrompt) {
+        httpRequest("DELETE", "/api/config/config_entries/flow/${prompt.flowId}", null)
+    }
+
+    fun submitSelectedFlow(prompt: HaFlowPrompt, values: Map<String, Any?>, name: String): HaEntryAssociation {
+        val result = postFlow("/api/config/config_entries/flow/${prompt.flowId}", values)
+        if (result.getString("type") == "create_entry") {
+            val entryId = checkNotNull(result.getJSONObject("result")?.getString("entry_id")) {
+                "Home Assistant created ${prompt.handler} without an entry ID"
+            }
+            openVerifiedSession().use { session ->
+                session.callCommand("config_entries/update", mapOf("entry_id" to entryId, "title" to name))
+                awaitEntryLoaded(session, entryId)
+            }
+            return entryAssociation(entryId, prompt.handler)
+        }
+        if (result.getString("type") == "abort") throw flowFailure(result)
+        val nextStep = checkNotNull(result.getString("step_id")) { "Home Assistant returned a form without a step ID" }
+        requireFlowStep(result, nextStep)
+        throw HomeAssistantFlowPromptException(
+            HaFlowPrompt(prompt.optionKey, prompt.handler, prompt.flowId, nextStep, readSupportedFlowFields(result))
+        )
+    }
+
+    private fun readSupportedFlowFields(form: JSONObject): List<HaFlowField> {
+        val schema = form.getJSONArray("data_schema") ?: throw invalidResponse("Home Assistant flow form has no data schema")
+        return (0 until schema.size).map { index ->
+            val field = schema.getJSONObject(index)
+            val name = checkNotNull(field.getString("name")) { "Home Assistant flow field has no name" }
+            val selector = field.getJSONObject("selector")
+            val selectorKey = selector?.keys?.singleOrNull()
+            val type = when (selectorKey) {
+                "text" -> if (selector.getJSONObject("text")?.getBooleanValue("password") == true) "password" else "string"
+                "boolean" -> "boolean"
+                "number" -> "number"
+                "select" -> "select"
+                else -> field.getString("type") ?: "unsupported"
+            }
+            check(type in setOf("string", "password", "boolean", "integer", "number", "select")) {
+                "Unsupported Home Assistant flow selector for '$name': ${selector?.toJSONString()}"
+            }
+            val options = if (type == "select") {
+                val select = checkNotNull(selector?.getJSONObject("select")) { "Select field '$name' has no selector config" }
+                val values = checkNotNull(select.getJSONArray("options")) { "Select field '$name' has no options" }
+                (0 until values.size).map { optionIndex ->
+                    when (val value = values.get(optionIndex)) {
+                        is String -> value
+                        is JSONObject -> checkNotNull(value.getString("value")) { "Select option has no value" }
+                        else -> error("Unsupported select option type for '$name': ${value.javaClass.name}")
+                    }
+                }
+            } else emptyList()
+            val description = field.getJSONObject("description")
+            // The flow API sends no translated labels, and suggested_value is a prefill, not a label.
+            val label = name.replace('_', ' ')
+            val required = field.getBooleanValue("required")
+            val default = (description?.get("suggested_value") ?: field.get("default"))?.toString()
+            HaFlowField(name, label, type, required, default, options)
+        }
+    }
+
     fun testConnection(): Boolean {
         openSession().use { session ->
             authenticate(session)
@@ -177,25 +328,6 @@ class HomeAssistantClient(
         return awaitLoadedEntry(session, device, ImportOutcome.ADDED)
     }
 
-    fun tuyaLocalEntryId(deviceId: String): String? =
-        openVerifiedSession().use { session -> findTuyaLocalEntryId(session, deviceId) }
-
-    // The host Tuya Local connects to. Entry data is not exposed over the API, but the options form defaults
-    // to the entry's current host, so the flow is opened, read and deleted without changing anything.
-    fun tuyaLocalHost(deviceId: String): String? {
-        val entryId = tuyaLocalEntryId(deviceId) ?: return null
-        val form = postFlow("/api/config/config_entries/options/flow", mapOf("handler" to entryId))
-        val flowId = form.getString("flow_id") ?: throw invalidResponse("Home Assistant returned no Tuya Local options flow ID.")
-        try {
-            requireFlowStep(form, "user")
-            val schema = form.getJSONArray("data_schema") ?: throw invalidResponse("The Tuya Local options form has no schema.")
-            val host = (0 until schema.size).map { schema.getJSONObject(it) }.single { it.getString("name") == "host" }
-            return host.getString("default") ?: throw invalidResponse("The Tuya Local options form has no current host.")
-        } finally {
-            httpRequest("DELETE", "/api/config/config_entries/options/flow/$flowId", null)
-        }
-    }
-
     // Entry summaries from config_entries/get carry no unique_id, so match on the device registry identifier
     // tuya-local registers: ("tuya_local", <device id>), then keep the device's tuya_local entry.
     private fun findTuyaLocalEntryId(session: WebSocketSession, deviceId: String): String? {
@@ -269,63 +401,38 @@ class HomeAssistantClient(
         return null
     }
 
-    fun configureTuyaStreams(deviceId: String, mainStreamUrl: String?, subStreamUrl: String?): String {
-        if (deviceId.isBlank() || (mainStreamUrl.isNullOrBlank() && subStreamUrl.isNullOrBlank())) {
-            throw HomeAssistantException(
-                HomeAssistantError.INVALID_FORMAT,
-                "Device ID and at least one stream URL are required."
-            )
-        }
-        openVerifiedSession().use { session ->
-            val fields = linkedMapOf<String, Any?>("device_id" to deviceId)
-            mainStreamUrl?.takeIf { it.isNotBlank() }?.let { fields["main_stream_url"] = it }
-            subStreamUrl?.takeIf { it.isNotBlank() }?.let { fields["sub_stream_url"] = it }
-            val response = session.callCommand("tuya_local/configure_streams", fields)
-            val result = response.getJSONObject("result")
-                ?: throw invalidResponse("Home Assistant returned no stream configuration result.")
-            val entryId = result.getString("entry_id")
-                ?: throw invalidResponse("Home Assistant returned no entry ID for stream configuration.")
-            awaitEntryLoaded(session, entryId)
-            enableCameraEntities(session, setOf(entryId))
-            return entryId
-        }
-    }
-
-    /**
-     * Deletes the device's Tuya Local entry, [entryIds], and the generic cameras titled [legacyCameraTitles].
-     * Entries already removed in Home Assistant are skipped. Returns how many entries were deleted.
-     */
+    /** Removes every tracked integration entry, entries linked in HA's device registry, and legacy titled entries. */
     fun removeDevice(deviceId: String, entryIds: List<String>, legacyCameraTitles: List<String>): Int {
         val targets = withVerifiedSession { session ->
             val entries = session.callCommand("config_entries/get").getJSONArray("result")
                 ?: throw invalidResponse("Home Assistant returned no config-entry list.")
-            val existing = mutableSetOf<String>()
+            val registry = session.callCommand("config/device_registry/list").getJSONArray("result")
+                ?: throw invalidResponse("Home Assistant returned no device registry.")
+            val linkedIds = mutableListOf<String>()
+            for (index in 0 until registry.size) {
+                val device = registry.getJSONObject(index)
+                val identifiers = device.getJSONArray("identifiers") ?: continue
+                val linked = (0 until identifiers.size).any { identifierIndex ->
+                    val identifier = identifiers.getJSONArray(identifierIndex)
+                    identifier.size >= 2 && identifier.getString(1) == deviceId
+                }
+                if (linked) {
+                    val configEntries = device.getJSONArray("config_entries")
+                        ?: throw invalidResponse("A Home Assistant device has no config_entries list.")
+                    for (entryIndex in 0 until configEntries.size) linkedIds += configEntries.getString(entryIndex)
+                }
+            }
             val legacyIds = mutableListOf<String>()
+            val existingIds = mutableSetOf<String>()
             for (index in 0 until entries.size) {
                 val entry = entries.getJSONObject(index)
                 val id = checkNotNull(entry.getString("entry_id")) { "A config entry has no entry ID" }
-                existing += id
-                if (entry.getString("domain") == "generic" && entry.getString("title") in legacyCameraTitles) {
-                    legacyIds += id
-                }
+                existingIds += id
+                if (entry.getString("domain") == "generic" && entry.getString("title") in legacyCameraTitles) legacyIds += id
             }
-            (listOfNotNull(findTuyaLocalEntryId(session, deviceId)) + entryIds + legacyIds)
-                .distinct()
-                .filter { it in existing }
+            (entryIds + linkedIds + legacyIds).distinct().filter { it in existingIds }
         }
-        targets.forEach { entryId ->
-            try {
-                httpRequest("DELETE", "/api/config/config_entries/entry/$entryId", null)
-            } catch (e: HomeAssistantException) {
-                // If an earlier attempt timed out while Home Assistant was still unloading the entry, the entry is now gone.
-                val stillPresent = withVerifiedSession { session ->
-                    val entries = session.callCommand("config_entries/get").getJSONArray("result")
-                        ?: throw invalidResponse("Home Assistant returned no config-entry list.")
-                    (0 until entries.size).any { entries.getJSONObject(it).getString("entry_id") == entryId }
-                }
-                if (stillPresent) throw e
-            }
-        }
+        targets.forEach(::removeIntegrationEntry)
         return targets.size
     }
 
@@ -355,19 +462,16 @@ class HomeAssistantClient(
         }
     }
 
-    /**
-     * Enables any `camera.*` entities on [entryIds] (and on the device's Tuya Local entry when [deviceId] is given)
-     * that the integration created disabled by default.
-     */
-    fun enableCameraEntitiesForDevice(deviceId: String?, vararg entryIds: String) {
-        withVerifiedSession { session ->
-            val targetEntryIds = entryIds.filter { it.isNotBlank() }.toMutableSet()
-            if (!deviceId.isNullOrBlank()) {
-                findTuyaLocalEntryId(session, deviceId)?.let { targetEntryIds += it }
+    private fun removeIntegrationEntry(entryId: String) {
+        try {
+            httpRequest("DELETE", "/api/config/config_entries/entry/$entryId", null)
+        } catch (error: HomeAssistantException) {
+            val stillPresent = withVerifiedSession { session ->
+                val entries = session.callCommand("config_entries/get").getJSONArray("result")
+                    ?: throw invalidResponse("Home Assistant returned no config-entry list.")
+                (0 until entries.size).any { entries.getJSONObject(it).getString("entry_id") == entryId }
             }
-            if (targetEntryIds.isNotEmpty()) {
-                enableCameraEntities(session, targetEntryIds)
-            }
+            if (stillPresent) throw error
         }
     }
 

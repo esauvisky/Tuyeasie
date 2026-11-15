@@ -166,16 +166,14 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
         val device = confirmation.device
         _uiState.update { it.copy(unpairingDeviceId = device.deviceId, actionError = null) }
         viewModelScope.launch {
-            // Home Assistant goes first: its cleanup can be retried, while a device removed from Tuya can't be unpaired again.
             if (store.loadSettings().hassUrl.isNotBlank()) {
                 try {
                     withContext(Dispatchers.IO) {
-                        val record = store.loadOnvifRecord(device.deviceId)
-                        // Feeds registered before entry IDs were stored can only be found by the titles they were given.
-                        val legacyTitles = if (record != null && record.registered && record.entryIds.isEmpty()) {
+                        homeAssistantClient.removeDevice(
+                            device.deviceId,
+                            store.integrationEntryIds(device.deviceId),
                             listOf("${device.name} Main", "${device.name} Substream")
-                        } else emptyList()
-                        homeAssistantClient.removeDevice(device.deviceId, record?.entryIds.orEmpty(), legacyTitles)
+                        )
                     }
                 } catch (e: HomeAssistantException) {
                     _uiState.update {
@@ -185,9 +183,7 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
                 }
             }
             try {
-                sdkLock.withLock {
-                    repository.removeDevice(confirmation.saved.account, confirmation.device.deviceId)
-                }
+                sdkLock.withLock { repository.removeDevice(confirmation.saved.account, device.deviceId) }
             } catch (e: TuyaSdkException) {
                 _uiState.update { it.copy(unpairingDeviceId = null, actionError = e.message) }
                 return@launch

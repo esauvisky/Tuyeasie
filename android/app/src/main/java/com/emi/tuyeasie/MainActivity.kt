@@ -28,10 +28,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -65,20 +63,14 @@ private enum class Tab(val label: String, val icon: ImageVector) {
 class MainActivity : ComponentActivity() {
     private val viewModel by viewModels<OnboardingViewModel>()
     private val myDevicesViewModel by viewModels<MyDevicesViewModel>()
-    private val scanPermissions = registerForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) {
+    private val scanPermissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         viewModel.onScanPermissionsResult(hasScanPermissions())
     }
 
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // The top bar is dark blue in light mode and near-black in dark mode, so status icons are always light.
-        enableEdgeToEdge(
-            statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
-            navigationBarStyle = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT)
-        )
+        enableEdgeToEdge(statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT), navigationBarStyle = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT))
         setContent {
             OnboardingTheme {
                 val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -87,21 +79,12 @@ class MainActivity : ComponentActivity() {
                 val uriHandler = LocalUriHandler.current
                 val bar = LocalHaBar.current
                 var deviceSource by remember { mutableStateOf<Pair<SavedTuyaAccount, TuyaManagedDevice>?>(null) }
+                var pendingUnpair by remember { mutableStateOf<Pair<SavedTuyaAccount, TuyaManagedDevice>?>(null) }
                 LaunchedEffect(state.permissionRequestVersion) {
                     if (state.permissionRequestVersion > 0) {
                         scanPermissions.launch(requiredScanPermissions())
                         viewModel.onPermissionRequestConsumed()
                     }
-                }
-                LaunchedEffect(state.added) {
-                    val added = state.added ?: return@LaunchedEffect
-                    val result = snackbar.showSnackbar(
-                        "${added.name} added to Home Assistant",
-                        actionLabel = "Open",
-                        duration = SnackbarDuration.Long
-                    )
-                    viewModel.consumeAdded()
-                    if (result == SnackbarResult.ActionPerformed) uriHandler.openUri(added.homeAssistantUrl)
                 }
                 LaunchedEffect(state.notice) {
                     val notice = state.notice ?: return@LaunchedEffect
@@ -117,17 +100,11 @@ class MainActivity : ComponentActivity() {
                         val showHost = tab == Tab.PAIR && state.connectionVerified && host != null
                         TopAppBar(
                             expandedHeight = if (showHost) 76.dp else TopAppBarDefaults.TopAppBarExpandedHeight,
-                            colors = TopAppBarDefaults.topAppBarColors(
-                                containerColor = bar.container,
-                                titleContentColor = bar.content,
-                                actionIconContentColor = bar.content
-                            ),
+                            colors = TopAppBarDefaults.topAppBarColors(containerColor = bar.container, titleContentColor = bar.content, actionIconContentColor = bar.content),
                             title = {
                                 Column {
                                     Text(if (tab == Tab.PAIR) "Tuyeasie" else tab.label)
-                                    if (showHost) {
-                                        Text("Home Assistant · $host", style = MaterialTheme.typography.bodyMedium, color = bar.subtitle)
-                                    }
+                                    if (showHost) Text("Home Assistant · $host", style = MaterialTheme.typography.bodyMedium, color = bar.subtitle)
                                 }
                             },
                             actions = {
@@ -157,12 +134,7 @@ class MainActivity : ComponentActivity() {
                     }
                 ) { padding ->
                     when (tab) {
-                        Tab.PAIR -> PairScreen(
-                            state = state,
-                            viewModel = viewModel,
-                            onOpenWifiSettings = { startActivity(Intent(Settings.ACTION_WIFI_SETTINGS)) },
-                            padding = padding
-                        )
+                        Tab.PAIR -> PairScreen(state, viewModel, onOpenWifiSettings = { startActivity(Intent(Settings.ACTION_WIFI_SETTINGS)) }, padding = padding)
                         Tab.DEVICES -> DevicesScreen(
                             viewModel = myDevicesViewModel,
                             configureEnabled = !state.busy,
@@ -181,51 +153,44 @@ class MainActivity : ComponentActivity() {
                         state,
                         viewModel,
                         iconUrl = source?.second?.iconUrl,
-                        onOpenSettings = {
-                            viewModel.closeDeviceScreen()
-                            tab = Tab.SETTINGS
-                        },
-                        onUnpair = source?.let { (account, device) ->
-                            {
+                        onOpenSettings = { viewModel.closeDeviceScreen(); tab = Tab.SETTINGS },
+                        onUnpair = source?.let { (account, device) -> { pendingUnpair = account to device } }
+                    )
+                }
+                pendingUnpair?.let { (account, device) ->
+                    androidx.compose.material3.AlertDialog(
+                        onDismissRequest = { pendingUnpair = null },
+                        title = { Text("Unpair device?") },
+                        text = { Text("${device.name} and all of its Home Assistant integrations will be removed. A factory reset may be needed before pairing again.") },
+                        confirmButton = {
+                            androidx.compose.material3.TextButton(onClick = {
+                                pendingUnpair = null
                                 viewModel.closeDeviceScreen()
                                 tab = Tab.DEVICES
                                 myDevicesViewModel.requestUnpair(account, device)
-                            }
-                        }
+                                myDevicesViewModel.confirm()
+                            }) { Text("Unpair") }
+                        },
+                        dismissButton = { androidx.compose.material3.TextButton(onClick = { pendingUnpair = null }) { Text("Cancel") } }
                     )
                 }
             }
         }
     }
 
-    // uiMode is a handled config change, so a light/dark switch must re-derive the navigation bar scrim here.
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        enableEdgeToEdge(
-            statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
-            navigationBarStyle = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT)
-        )
+        enableEdgeToEdge(statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT), navigationBarStyle = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT))
     }
 
     private fun hasScanPermissions(): Boolean = requiredScanPermissions().all { permission ->
         checkSelfPermission(permission) == android.content.pm.PackageManager.PERMISSION_GRANTED
     }
 
-    private fun requiredScanPermissions(): Array<String> =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            arrayOf(
-                Manifest.permission.ACCESS_FINE_LOCATION,
-                Manifest.permission.NEARBY_WIFI_DEVICES,
-                Manifest.permission.BLUETOOTH_SCAN,
-                Manifest.permission.BLUETOOTH_CONNECT
-            )
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            arrayOf(
-                Manifest.permission.ACCESS_FINE_LOCATION,
-                Manifest.permission.BLUETOOTH_SCAN,
-                Manifest.permission.BLUETOOTH_CONNECT
-            )
-        } else {
-            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
-        }
+    private fun requiredScanPermissions(): Array<String> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.NEARBY_WIFI_DEVICES,
+            Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+    } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+    } else arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
 }

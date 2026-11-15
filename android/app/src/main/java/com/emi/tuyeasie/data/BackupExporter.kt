@@ -66,10 +66,6 @@ class BackupExporter(private val store: SecureSettingsStore) {
                     .put("countryCode", settings.countryCode)
                     .put("homeWifiSsid", settings.homeWifiSsid)
                     .put("homeWifiPassword", seal(settings.homeWifiPassword))
-                    .put("feedDestination", settings.feedDestination)
-                    .put("go2rtcUrl", settings.go2rtcUrl)
-                    .put("go2rtcUsername", settings.go2rtcUsername)
-                    .put("go2rtcPassword", seal(settings.go2rtcPassword))
             )
             .put(
                 "onvif",

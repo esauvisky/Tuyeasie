@@ -12,11 +12,7 @@ data class AppSettings(
     val adminToken: String = "",
     val countryCode: String = "55",
     val homeWifiSsid: String = "",
-    val homeWifiPassword: String = "",
-    val feedDestination: String = "tuya_local",
-    val go2rtcUrl: String = "",
-    val go2rtcUsername: String = "",
-    val go2rtcPassword: String = ""
+    val homeWifiPassword: String = ""
 )
 
 data class ActivatedDevice(
@@ -60,17 +56,6 @@ data class OnvifRecord(
             "entryIds=$entryIds, verified=$verified)"
 }
 
-enum class ImportState {
-    PENDING,
-    IMPORTED
-}
-
-data class PendingDeviceRecord(
-    val device: ActivatedDevice,
-    val state: ImportState,
-    val lastError: String?
-)
-
 class SecureSettingsStore(context: Context) {
     private val appContext = context.applicationContext
     private val masterKey = MasterKey.Builder(appContext)
@@ -89,11 +74,7 @@ class SecureSettingsStore(context: Context) {
         adminToken = preferences.getString(KEY_ADMIN_TOKEN, "").orEmpty(),
         countryCode = preferences.getString(KEY_COUNTRY_CODE, "55").orEmpty(),
         homeWifiSsid = preferences.getString(KEY_WIFI_SSID, "").orEmpty(),
-        homeWifiPassword = preferences.getString(KEY_WIFI_PASSWORD, "").orEmpty(),
-        feedDestination = preferences.getString(KEY_FEED_DESTINATION, "tuya_local").orEmpty(),
-        go2rtcUrl = preferences.getString(KEY_GO2RTC_URL, "").orEmpty(),
-        go2rtcUsername = preferences.getString(KEY_GO2RTC_USERNAME, "").orEmpty(),
-        go2rtcPassword = preferences.getString(KEY_GO2RTC_PASSWORD, "").orEmpty()
+        homeWifiPassword = preferences.getString(KEY_WIFI_PASSWORD, "").orEmpty()
     )
 
     fun saveSettings(settings: AppSettings) {
@@ -103,10 +84,6 @@ class SecureSettingsStore(context: Context) {
             .putString(KEY_COUNTRY_CODE, settings.countryCode)
             .putString(KEY_WIFI_SSID, settings.homeWifiSsid)
             .putString(KEY_WIFI_PASSWORD, settings.homeWifiPassword)
-            .putString(KEY_FEED_DESTINATION, settings.feedDestination)
-            .putString(KEY_GO2RTC_URL, settings.go2rtcUrl)
-            .putString(KEY_GO2RTC_USERNAME, settings.go2rtcUsername)
-            .putString(KEY_GO2RTC_PASSWORD, settings.go2rtcPassword)
             .commit()
         check(committed) { "Unable to persist encrypted settings" }
     }
@@ -276,6 +253,79 @@ class SecureSettingsStore(context: Context) {
         check(committed) { "Unable to persist device capabilities" }
     }
 
+    fun loadIntegrationOptions(deviceId: String): List<HaIntegrationOption> {
+        val raw = preferences.getString(KEY_INTEGRATION_PREFIX + deviceId, null)
+        if (raw != null) {
+            val array = JSONArray(raw)
+            fun JSONObject.optText(key: String): String? = if (isNull(key)) null else getString(key)
+            return (0 until array.length()).map { index ->
+                val item = array.getJSONObject(index)
+                HaIntegrationOption(
+                    key = item.getString("key"),
+                    label = item.getString("label"),
+                    handler = item.optText("handler"),
+                    detectedService = item.optText("detectedService"),
+                    enabled = item.getBoolean("enabled"),
+                    unavailableReason = item.optText("unavailableReason"),
+                    status = IntegrationStatus.valueOf(item.getString("status")),
+                    entryId = item.optText("entryId"),
+                    deviceRegistryId = item.optText("deviceRegistryId"),
+                    openUrl = item.optText("openUrl"),
+                    error = item.optText("error"),
+                    updatedAt = item.getLong("updatedAt")
+                )
+            }
+        }
+        val legacy = loadOnvifRecord(deviceId) ?: return emptyList()
+        if (legacy.entryIds.isEmpty() && legacy.destination == null) return emptyList()
+        val migrated = buildList {
+            legacy.entryIds.forEachIndexed { index, entryId ->
+                val key = when (legacy.destination) {
+                    "tuya_local" -> IntegrationKeys.TUYA_LOCAL
+                    "onvif" -> IntegrationKeys.ONVIF
+                    "generic_camera" -> if (index == 0) IntegrationKeys.GENERIC else "generic_substream"
+                    else -> if (index == 0) IntegrationKeys.GENERIC else "legacy_entry_$index"
+                }
+                add(HaIntegrationOption(
+                    key, key, key.takeIf { it in setOf(IntegrationKeys.TUYA_LOCAL, IntegrationKeys.ONVIF, IntegrationKeys.GENERIC) },
+                    null, true, null, IntegrationStatus.ADDED, entryId, null, null, null, System.currentTimeMillis()
+                ))
+            }
+        }.distinctBy { it.key }
+        saveIntegrationOptions(deviceId, migrated)
+        return migrated
+    }
+
+    fun saveIntegrationOptions(deviceId: String, options: List<HaIntegrationOption>) {
+        val json = JSONArray(options.map(::integrationOptionJson))
+        val committed = preferences.edit().putString(KEY_INTEGRATION_PREFIX + deviceId, json.toString()).commit()
+        check(committed) { "Unable to persist Home Assistant options for $deviceId" }
+    }
+
+    fun updateIntegrationOption(deviceId: String, option: HaIntegrationOption) {
+        val current = loadIntegrationOptions(deviceId)
+        val updated = if (current.any { it.key == option.key }) current.map { if (it.key == option.key) option else it }
+        else current + option
+        saveIntegrationOptions(deviceId, updated)
+    }
+
+    fun integrationEntryIds(deviceId: String): List<String> =
+        (loadIntegrationOptions(deviceId).mapNotNull { it.entryId } + loadOnvifRecord(deviceId)?.entryIds.orEmpty()).distinct()
+
+    private fun integrationOptionJson(option: HaIntegrationOption) = JSONObject()
+        .put("key", option.key)
+        .put("label", option.label)
+        .put("handler", option.handler ?: JSONObject.NULL)
+        .put("detectedService", option.detectedService ?: JSONObject.NULL)
+        .put("enabled", option.enabled)
+        .put("unavailableReason", option.unavailableReason ?: JSONObject.NULL)
+        .put("status", option.status.name)
+        .put("entryId", option.entryId ?: JSONObject.NULL)
+        .put("deviceRegistryId", option.deviceRegistryId ?: JSONObject.NULL)
+        .put("openUrl", option.openUrl ?: JSONObject.NULL)
+        .put("error", option.error ?: JSONObject.NULL)
+        .put("updatedAt", option.updatedAt)
+
     fun loadNetworkReport(deviceId: String): NetworkReport? {
         val raw = preferences.getString(KEY_NETWORK_PREFIX + deviceId, null) ?: return null
         val json = JSONObject(raw)
@@ -293,8 +343,8 @@ class SecureSettingsStore(context: Context) {
         val ports = json.getJSONArray("openPorts")
         val onvif = if (json.isNull("onvif")) null else json.getJSONObject("onvif")
         return NetworkReport(
-            ip = json.getString("ip"),
-            addressSource = AddressSource.valueOf(json.getString("addressSource")),
+            ip = json.optText("ip"),
+            addressSource = json.optText("addressSource")?.let(AddressSource::valueOf),
             scannedAt = json.getLong("scannedAt"),
             openPorts = (0 until ports.length()).map { index ->
                 val port = ports.getJSONObject(index)
@@ -327,8 +377,8 @@ class SecureSettingsStore(context: Context) {
                 .put("source", it.source.name)
         })
         val json = JSONObject()
-            .put("ip", report.ip)
-            .put("addressSource", report.addressSource.name)
+            .put("ip", report.ip ?: JSONObject.NULL)
+            .put("addressSource", report.addressSource?.name ?: JSONObject.NULL)
             .put("scannedAt", report.scannedAt)
             .put("openPorts", JSONArray(report.openPorts.map {
                 JSONObject()
@@ -415,6 +465,7 @@ class SecureSettingsStore(context: Context) {
         val editor = preferences.edit()
             .remove(KEY_CAPABILITIES_PREFIX + deviceId)
             .remove(KEY_NETWORK_PREFIX + deviceId)
+            .remove(KEY_INTEGRATION_PREFIX + deviceId)
         preferences.all.keys.filter { it.startsWith("$ONVIF_PREFIX${deviceId}_") }.forEach { editor.remove(it) }
         preferences.all.keys.filter { it.startsWith(KEY_CACHED_DEVICES_PREFIX) }.forEach { key ->
             val raw = preferences.getString(key, null) ?: return@forEach
@@ -433,50 +484,6 @@ class SecureSettingsStore(context: Context) {
 
     private fun randomHex(bytes: Int): String =
         ByteArray(bytes).also(SecureRandom()::nextBytes).joinToString("") { "%02x".format(it) }
-
-    fun loadPendingDevice(): PendingDeviceRecord? {
-        val deviceId = preferences.getString(KEY_DEVICE_ID, null) ?: return null
-        return PendingDeviceRecord(
-            device = ActivatedDevice(
-                deviceId = deviceId,
-                localKey = preferences.getString(KEY_LOCAL_KEY, null).orEmpty(),
-                name = preferences.getString(KEY_DEVICE_NAME, null).orEmpty(),
-                productId = preferences.getString(KEY_PRODUCT_ID, null).orEmpty(),
-                protocolVersion = preferences.getString(KEY_PROTOCOL_VERSION, null),
-                category = preferences.getString(KEY_CATEGORY, null),
-                ip = preferences.getString(KEY_IP, null)
-            ),
-            state = ImportState.valueOf(
-                preferences.getString(KEY_IMPORT_STATE, ImportState.PENDING.name)
-                    ?: ImportState.PENDING.name
-            ),
-            lastError = preferences.getString(KEY_LAST_ERROR, null)
-        )
-    }
-
-    fun savePendingDevice(device: ActivatedDevice) {
-        savePendingDevice(PendingDeviceRecord(device, ImportState.PENDING, null))
-    }
-
-    fun savePendingDevice(record: PendingDeviceRecord) {
-        val committed = preferences.edit()
-            .putString(KEY_DEVICE_ID, record.device.deviceId)
-            .putString(KEY_LOCAL_KEY, record.device.localKey)
-            .putString(KEY_DEVICE_NAME, record.device.name)
-            .putString(KEY_PRODUCT_ID, record.device.productId)
-            .putString(KEY_PROTOCOL_VERSION, record.device.protocolVersion)
-            .putString(KEY_CATEGORY, record.device.category)
-            .putString(KEY_IP, record.device.ip)
-            .putString(KEY_IMPORT_STATE, record.state.name)
-            .putString(KEY_LAST_ERROR, sanitizeError(record.lastError, record.device))
-            .commit()
-        check(committed) { "Unable to persist encrypted device record" }
-    }
-
-    fun updatePendingDeviceState(state: ImportState, lastError: String? = null) {
-        val current = checkNotNull(loadPendingDevice()) { "No pending device record" }
-        savePendingDevice(current.copy(state = state, lastError = lastError))
-    }
 
     private fun sanitizeError(error: String?, device: ActivatedDevice): String? {
         if (error == null) return null
@@ -507,10 +514,6 @@ class SecureSettingsStore(context: Context) {
         const val KEY_COUNTRY_CODE = "country_code"
         const val KEY_WIFI_SSID = "home_wifi_ssid"
         const val KEY_WIFI_PASSWORD = "home_wifi_password"
-        const val KEY_FEED_DESTINATION = "feed_destination"
-        const val KEY_GO2RTC_URL = "go2rtc_url"
-        const val KEY_GO2RTC_USERNAME = "go2rtc_username"
-        const val KEY_GO2RTC_PASSWORD = "go2rtc_password"
         const val KEY_TUYA_UID = "tuya_uid"
         const val KEY_TUYA_PASSWORD = "tuya_password"
         const val KEY_CAMERA_EMAIL = "camera_account_email"
@@ -522,15 +525,7 @@ class SecureSettingsStore(context: Context) {
         const val KEY_CAPABILITIES_PREFIX = "capabilities_"
         const val KEY_NETWORK_PREFIX = "network_"
         const val KEY_CACHED_DEVICES_PREFIX = "cached_devices_"
-        const val KEY_DEVICE_ID = "device_id"
-        const val KEY_LOCAL_KEY = "device_local_key"
-        const val KEY_DEVICE_NAME = "device_name"
-        const val KEY_PRODUCT_ID = "device_product_id"
-        const val KEY_PROTOCOL_VERSION = "device_protocol_version"
-        const val KEY_CATEGORY = "device_category"
-        const val KEY_IP = "device_ip"
-        const val KEY_IMPORT_STATE = "import_state"
-        const val KEY_LAST_ERROR = "import_last_error"
+        const val KEY_INTEGRATION_PREFIX = "ha_integrations_"
         const val MAX_ERROR_LENGTH = 1000
     }
 }

@@ -11,8 +11,6 @@ data class DeviceCapabilities(
 ) {
     val tuyaOnvif: Boolean
         get() = TUYA_ONVIF_CODES.all { it in dataPoints }
-
-    // Tuya Local matches and controls devices by their data points; a device with none is camera/ONVIF-only.
     val supportsTuyaLocal: Boolean
         get() = tuyaLan && dataPoints.isNotEmpty()
 
@@ -22,8 +20,53 @@ data class DeviceCapabilities(
         )
     }
 }
+enum class IntegrationStatus { AVAILABLE, ADDING, ADDED, FAILED, REMOVED }
 
-/** One open TCP port and what answered on it. */
+object IntegrationKeys {
+    const val TUYA_LOCAL = "tuya_local"
+    const val ONVIF = "onvif"
+    const val GENERIC = "generic"
+}
+
+data class HaIntegrationOption(
+    val key: String,
+    val label: String,
+    val handler: String?,
+    val detectedService: String?,
+    val enabled: Boolean,
+    val unavailableReason: String?,
+    val status: IntegrationStatus,
+    val entryId: String?,
+    val deviceRegistryId: String?,
+    val openUrl: String?,
+    val error: String?,
+    val updatedAt: Long
+)
+
+data class HaFlowField(
+    val name: String,
+    val label: String,
+    val type: String,
+    val required: Boolean,
+    val defaultValue: String?,
+    val options: List<String> = emptyList()
+)
+
+data class HaFlowPrompt(
+    val optionKey: String,
+    val handler: String,
+    val flowId: String,
+    val stepId: String,
+    val fields: List<HaFlowField>
+)
+
+data class HaEntryAssociation(
+    val entryId: String,
+    val deviceRegistryId: String?,
+    val openUrl: String
+)
+
+
 data class OpenPort(
     val port: Int,
     val service: String,
@@ -46,22 +89,10 @@ data class Credentials(val username: String, val password: String) {
 
     companion object {
         val DEFAULT = Credentials("admin", "admin")
-        val DEFAULT_PASSWORDS = listOf(
-            "admin",
-            "admin123",
-            "123456",
-            "12345678",
-            "admin1234",
-            "888888",
-            "12345",
-            "password"
-        )
+        val DEFAULT_PASSWORDS = listOf("admin", "admin123", "123456", "12345678", "admin1234", "888888", "12345", "password")
         val DEFAULTS = DEFAULT_PASSWORDS.map { Credentials("admin", it) } + listOf(
-            Credentials("admin", ""),
-            Credentials("root", "root"),
-            Credentials("root", "123456")
+            Credentials("admin", ""), Credentials("root", "root"), Credentials("root", "123456")
         )
-
         fun candidates(preferred: Credentials? = null): List<Credentials> =
             (listOfNotNull(preferred?.takeIf { it.username.isNotEmpty() || it.password.isNotEmpty() }) + DEFAULTS).distinct()
     }
@@ -85,8 +116,8 @@ enum class AddressSource(val label: String) {
 }
 
 data class NetworkReport(
-    val ip: String,
-    val addressSource: AddressSource,
+    val ip: String?,
+    val addressSource: AddressSource?,
     val scannedAt: Long,
     val openPorts: List<OpenPort>,
     val onvif: OnvifInfo?,
