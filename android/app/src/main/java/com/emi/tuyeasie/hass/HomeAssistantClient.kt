@@ -98,11 +98,7 @@ class HomeAssistantClient(
         }
     }
 
-    fun dynamicFlowAvailable(option: HaIntegrationOption, handlers: Set<String>): Boolean =
-        option.enabled && option.handler != null && option.handler in handlers
-
     fun addIntegration(option: HaIntegrationOption, device: ActivatedDevice, report: NetworkReport, credentials: Credentials?): HaEntryAssociation {
-        check(option.enabled) { option.unavailableReason ?: "Integration is not available" }
         val entryId = when (option.key) {
             "tuya_local" -> importDevice(
                 device.copy(ip = checkNotNull(report.ip) { "Tuya Local needs a LAN address" }),
@@ -133,7 +129,6 @@ class HomeAssistantClient(
     }
 
     fun beginSelectedFlow(option: HaIntegrationOption): HaFlowPrompt {
-        check(option.enabled) { option.unavailableReason ?: "Integration is not available" }
         val handler = checkNotNull(option.handler) { "Integration option has no flow handler" }
         val start = postFlow("/api/config/config_entries/flow", mapOf("handler" to handler))
         if (start.getString("type") == "abort") throw flowFailure(start)

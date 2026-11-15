@@ -111,13 +111,13 @@ private fun HomeAssistantIntegrationsCard(state: OnboardingUiState, viewModel: O
         if (state.scanStatus == ScanStatus.SCANNING && state.integrationOptions.isEmpty()) {
             StatusLine(checkNotNull(state.scanProgress) { "Scan is active without progress" }, busy = true)
         }
-        if (state.integrationOptions.isEmpty() && state.scanStatus == ScanStatus.IDLE) CardText("No Home Assistant integrations detected yet.")
+        if (state.integrationOptions.isEmpty() && state.scanStatus == ScanStatus.IDLE) CardText("Nothing on this device can be added to Home Assistant.")
         state.integrationOptions.forEach { option ->
             val tone = when (option.status) {
                 IntegrationStatus.ADDED -> RowTone.OK
                 IntegrationStatus.ADDING -> RowTone.WORKING
                 IntegrationStatus.FAILED -> RowTone.FAILED
-                IntegrationStatus.AVAILABLE, IntegrationStatus.REMOVED -> RowTone.NEUTRAL
+                IntegrationStatus.AVAILABLE -> RowTone.NEUTRAL
             }
             EntityRow(
                 icon = { EntityIcon(categoryIcon(state.activatedDevice?.category), tone, busy = option.status == IntegrationStatus.ADDING) },
@@ -126,20 +126,16 @@ private fun HomeAssistantIntegrationsCard(state: OnboardingUiState, viewModel: O
                     option.status == IntegrationStatus.ADDING -> "Adding…"
                     option.status == IntegrationStatus.ADDED -> "Added to Home Assistant"
                     option.status == IntegrationStatus.FAILED -> checkNotNull(option.error)
-                    !option.enabled -> checkNotNull(option.unavailableReason)
-                    else -> option.detectedService ?: "Available"
+                    else -> "Not added"
                 },
                 tone = tone
             ) {
                 when (option.status) {
                     IntegrationStatus.ADDED -> CardAction("Open", { viewModel.openIntegration(option.key, uriHandler::openUri) })
                     IntegrationStatus.ADDING -> Unit
-                    else -> if (option.enabled) CardAction("Add", { viewModel.chooseIntegration(option.key) })
+                    IntegrationStatus.AVAILABLE, IntegrationStatus.FAILED -> CardAction("Add", { viewModel.chooseIntegration(option.key) })
                 }
             }
-        }
-        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.End) {
-            CardAction("Choose integration", viewModel::showIntegrationChooser, enabled = state.scanStatus == ScanStatus.IDLE)
         }
         state.scanError?.let { InlineError(it) }
     }
@@ -149,22 +145,23 @@ private fun HomeAssistantIntegrationsCard(state: OnboardingUiState, viewModel: O
 
 @Composable
 private fun IntegrationChooserDialog(state: OnboardingUiState, viewModel: OnboardingViewModel) {
+    val selected = state.chooserSelection
     AlertDialog(
         onDismissRequest = viewModel::dismissIntegrationChooser,
-        title = { Text("Choose Home Assistant integrations") },
+        title = { Text("Add to Home Assistant") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                state.integrationOptions.forEach { option ->
-                    ChoiceRow(option.label + if (option.enabled) "" else " · unavailable", state.selectedIntegrationKey == option.key) {
-                        if (option.enabled) viewModel.chooseIntegration(option.key)
-                    }
-                    option.unavailableReason?.let { CardText(it) }
+            Column {
+                state.integrationOptions.filter { it.status == IntegrationStatus.AVAILABLE }.forEach { option ->
+                    CheckRow(option.label, option.key in selected) { viewModel.toggleChooserOption(option.key) }
                 }
-                if (state.integrationOptions.isEmpty()) CardText("No compatible integration detected. You can Skip and rescan later.")
             }
         },
-        confirmButton = { TextButton(onClick = viewModel::skipIntegrationChoice) { Text("Skip") } },
-        dismissButton = { TextButton(onClick = viewModel::dismissIntegrationChooser) { Text("Cancel") } }
+        confirmButton = {
+            TextButton(onClick = viewModel::addChosenIntegrations, enabled = selected.isNotEmpty()) {
+                Text(if (selected.isEmpty()) "Add" else "Add ${selected.size}")
+            }
+        },
+        dismissButton = { TextButton(onClick = viewModel::dismissIntegrationChooser) { Text("Skip") } }
     )
 }
 

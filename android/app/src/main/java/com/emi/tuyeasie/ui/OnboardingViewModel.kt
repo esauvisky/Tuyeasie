@@ -113,7 +113,7 @@ data class OnboardingUiState(
     val showOnvifPassword: Boolean = false,
     val capabilities: DeviceCapabilities? = null,
     val integrationOptions: List<HaIntegrationOption> = emptyList(),
-    val selectedIntegrationKey: String? = null,
+    val chooserSelection: Set<String> = emptySet(),
     val flowInputPrompt: HaFlowPrompt? = null,
     val flowInputValues: Map<String, String> = emptyMap(),
     val flowInputError: String? = null,
@@ -130,7 +130,7 @@ data class OnboardingUiState(
 
 private fun OnboardingUiState.withoutDeviceState() = copy(
     integrationChooserVisible = false,
-    selectedIntegrationKey = null,
+    chooserSelection = emptySet(),
     flowInputPrompt = null,
     flowInputValues = emptyMap(),
     flowInputError = null,
@@ -961,17 +961,8 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
             }
             resetPairing()
             if (address == null) {
-                val handlers = try {
-                    withContext(Dispatchers.IO) { homeAssistantClient.availableFlowHandlers() }
-                } catch (e: HomeAssistantException) {
-                    update { copy(connectionVerified = false, connectionError = homeAssistantMessage(e, settings)) }
-                    return@launch
-                }
-                val previous = store.loadIntegrationOptions(device.deviceId)
-                val options = buildIntegrationCatalog(capabilities, null, handlers, previous)
-                    .map { option -> if (option.enabled && option.key != IntegrationKeys.TUYA_LOCAL) option.copy(enabled = false, unavailableReason = "A local address is required to configure this integration.") else option }
-                withContext(Dispatchers.IO) { store.saveIntegrationOptions(device.deviceId, options) }
-                update { copy(integrationOptions = options, integrationChooserVisible = true, scanError = "No local address was discovered; integrations requiring a host are unavailable.") }
+                val options = withContext(Dispatchers.IO) { store.loadIntegrationOptions(device.deviceId) }
+                update { copy(integrationOptions = options, scanError = "No local address was found, so nothing can be added to Home Assistant yet.") }
             } else {
                 launchNetworkScan(device.deviceId, capabilities, address, showChooserWhenComplete = true)
             }
@@ -1088,7 +1079,8 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                     scanProgress = null,
                     onvifRecord = adopted ?: onvifRecord,
                     onvifStatus = if (adopted != null && onvifStatus != OnvifStatus.CONFIGURING) OnvifStatus.COMPLETE else onvifStatus,
-                    integrationChooserVisible = integrationChooserVisible || (showChooserWhenComplete && handlers != null)
+                    integrationChooserVisible = integrationChooserVisible ||
+                        (showChooserWhenComplete && handlers != null && options.any { it.status == IntegrationStatus.AVAILABLE })
                 )
             }
         }
@@ -1258,17 +1250,17 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
 
     fun toggleOnvifPasswordVisibility() = update { copy(showOnvifPassword = !showOnvifPassword) }
 
-    fun showIntegrationChooser() {
-        check(current.integrationOptions.isNotEmpty()) { "Integration options are not available yet" }
-        check(current.scanStatus == ScanStatus.IDLE) { "The device scan is still running" }
-        update { copy(integrationChooserVisible = true) }
+    fun dismissIntegrationChooser() = update { copy(integrationChooserVisible = false, chooserSelection = emptySet()) }
+
+    fun toggleChooserOption(key: String) = update {
+        copy(chooserSelection = if (key in chooserSelection) chooserSelection - key else chooserSelection + key)
     }
 
-    fun dismissIntegrationChooser() = update { copy(integrationChooserVisible = false) }
-
-    fun skipIntegrationChoice() {
-        check(current.integrationChooserVisible) { "Integration chooser is not open" }
-        update { copy(integrationChooserVisible = false, selectedIntegrationKey = null) }
+    fun addChosenIntegrations() {
+        val keys = current.chooserSelection
+        check(keys.isNotEmpty()) { "No integration selected" }
+        update { copy(integrationChooserVisible = false, chooserSelection = emptySet()) }
+        keys.forEach(::chooseIntegration)
     }
 
     fun setFlowField(name: String, value: String) = update {
@@ -1276,9 +1268,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun chooseIntegration(key: String) {
-        val option = current.integrationOptions.single { it.key == key }
-        check(option.enabled) { option.unavailableReason ?: "Integration is not available" }
-        update { copy(integrationChooserVisible = false, selectedIntegrationKey = key, flowInputError = null) }
+        update { copy(flowInputError = null) }
         val fixedAdapter = key == IntegrationKeys.TUYA_LOCAL || key == IntegrationKeys.ONVIF ||
             key == IntegrationKeys.GENERIC || key.startsWith("${IntegrationKeys.GENERIC}:")
         if (fixedAdapter) addIntegration(key) else beginDynamicFlow(key)
@@ -1353,7 +1343,6 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
 
     fun addIntegration(key: String) {
         val option = current.integrationOptions.single { it.key == key }
-        check(option.enabled) { option.unavailableReason ?: "Integration is not available" }
         val device = checkNotNull(current.activatedDevice) { "No device for integration" }
         val report = checkNotNull(current.networkReport) { "No completed device scan" }
         val adding = option.copy(status = IntegrationStatus.ADDING, error = null, updatedAt = System.currentTimeMillis())
@@ -1368,10 +1357,9 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                     homeAssistantClient.addIntegration(option, device, report, credentials)
                 }
                 persistIntegrationSuccess(key, association)
-                update { copy(selectedIntegrationKey = key) }
             } catch (e: HomeAssistantException) {
                 if (key == IntegrationKeys.TUYA_LOCAL && e.error == HomeAssistantError.UNSUPPORTED_PROFILE) {
-                    disableIntegration(key, "Tuya Local has no profile for product ${device.productId}.")
+                    failIntegration(key, "Tuya Local has no profile for product ${device.productId}.")
                 } else failIntegration(key, e.publicMessage)
             }
         }
@@ -1382,7 +1370,6 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         val old = current.integrationOptions.single { it.key == key }
         val saved = old.copy(
             status = IntegrationStatus.ADDED,
-            enabled = true,
             entryId = association.entryId,
             deviceRegistryId = association.deviceRegistryId,
             openUrl = association.openUrl,
@@ -1399,15 +1386,6 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         val failed = old.copy(status = IntegrationStatus.FAILED, error = message, updatedAt = System.currentTimeMillis())
         withContext(Dispatchers.IO) { store.updateIntegrationOption(deviceId, failed) }
         updateIntegration(key) { failed }
-    }
-
-    private suspend fun disableIntegration(key: String, reason: String) {
-        val deviceId = checkNotNull(current.activatedDevice) { "No active device after integration failure" }.deviceId
-        val old = current.integrationOptions.single { it.key == key }
-        val disabled = old.copy(enabled = false, unavailableReason = reason, status = IntegrationStatus.REMOVED,
-            error = null, updatedAt = System.currentTimeMillis())
-        withContext(Dispatchers.IO) { store.updateIntegrationOption(deviceId, disabled) }
-        updateIntegration(key) { disabled }
     }
 
     private fun updateIntegration(key: String, transform: (HaIntegrationOption) -> HaIntegrationOption) = update {

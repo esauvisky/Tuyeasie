@@ -54,7 +54,7 @@ data class DeviceCapabilities(
         )
     }
 }
-enum class IntegrationStatus { AVAILABLE, ADDING, ADDED, FAILED, REMOVED }
+enum class IntegrationStatus { AVAILABLE, ADDING, ADDED, FAILED }
 
 object IntegrationKeys {
     const val TUYA_LOCAL = "tuya_local"
@@ -66,9 +66,6 @@ data class HaIntegrationOption(
     val key: String,
     val label: String,
     val handler: String?,
-    val detectedService: String?,
-    val enabled: Boolean,
-    val unavailableReason: String?,
     val status: IntegrationStatus,
     val entryId: String?,
     val deviceRegistryId: String?,

@@ -257,15 +257,12 @@ class SecureSettingsStore(context: Context) {
         if (raw != null) {
             val array = JSONArray(raw)
             fun JSONObject.optText(key: String): String? = if (isNull(key)) null else getString(key)
-            return (0 until array.length()).map { index ->
-                val item = array.getJSONObject(index)
+            // 2.0.0 also stored detected-but-unaddable options as REMOVED; those are no longer tracked.
+            return (0 until array.length()).map(array::getJSONObject).filter { it.getString("status") != "REMOVED" }.map { item ->
                 HaIntegrationOption(
                     key = item.getString("key"),
                     label = item.getString("label"),
                     handler = item.optText("handler"),
-                    detectedService = item.optText("detectedService"),
-                    enabled = item.getBoolean("enabled"),
-                    unavailableReason = item.optText("unavailableReason"),
                     status = IntegrationStatus.valueOf(item.getString("status")),
                     entryId = item.optText("entryId"),
                     deviceRegistryId = item.optText("deviceRegistryId"),
@@ -287,7 +284,7 @@ class SecureSettingsStore(context: Context) {
                 }
                 add(HaIntegrationOption(
                     key, key, key.takeIf { it in setOf(IntegrationKeys.TUYA_LOCAL, IntegrationKeys.ONVIF, IntegrationKeys.GENERIC) },
-                    null, true, null, IntegrationStatus.ADDED, entryId, null, null, null, System.currentTimeMillis()
+                    IntegrationStatus.ADDED, entryId, null, null, null, System.currentTimeMillis()
                 ))
             }
         }.distinctBy { it.key }
@@ -315,9 +312,6 @@ class SecureSettingsStore(context: Context) {
         .put("key", option.key)
         .put("label", option.label)
         .put("handler", option.handler ?: JSONObject.NULL)
-        .put("detectedService", option.detectedService ?: JSONObject.NULL)
-        .put("enabled", option.enabled)
-        .put("unavailableReason", option.unavailableReason ?: JSONObject.NULL)
         .put("status", option.status.name)
         .put("entryId", option.entryId ?: JSONObject.NULL)
         .put("deviceRegistryId", option.deviceRegistryId ?: JSONObject.NULL)
