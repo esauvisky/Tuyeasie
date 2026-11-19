@@ -20,6 +20,7 @@ import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Lan
 import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Router
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.AlertDialog
@@ -77,14 +78,19 @@ fun DeviceScreen(state: OnboardingUiState, viewModel: OnboardingViewModel, iconU
                     }
                 },
                 title = { Text(device.name) },
-                actions = { if (onUnpair != null) Box {
+                actions = {
+                    IconButton(onClick = viewModel::refreshDevice, enabled = !busy && state.scanStatus == ScanStatus.IDLE) {
+                        Icon(Icons.Outlined.Refresh, contentDescription = "Refresh everything, including the address")
+                    }
+                    if (onUnpair != null) Box {
                     IconButton(onClick = { menuOpen = true }, enabled = !busy) {
                         Icon(Icons.Outlined.MoreVert, contentDescription = "More for ${device.name}")
                     }
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                         DropdownMenuItem(text = { Text("Unpair", color = MaterialTheme.colorScheme.error) }, onClick = { menuOpen = false; onUnpair() })
                     }
-                } }
+                    }
+                }
             )
         }
     ) { padding ->

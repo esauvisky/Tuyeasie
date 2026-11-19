@@ -975,11 +975,15 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     // Blocking.
-    private fun locate(deviceId: String, capabilities: DeviceCapabilities): DeviceAddress =
+    private fun locate(
+        deviceId: String,
+        capabilities: DeviceCapabilities,
+        savedRecord: OnvifRecord? = store.loadOnvifRecord(deviceId)
+    ): DeviceAddress =
         addressResolver.resolve(
             deviceId,
             capabilities,
-            store.loadOnvifRecord(deviceId),
+            savedRecord,
             Credentials.candidates(preferredCredentials(deviceId))
         )
 
@@ -1044,7 +1048,8 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         deviceId: String,
         capabilities: DeviceCapabilities,
         address: DeviceAddress,
-        showChooserWhenComplete: Boolean = false
+        showChooserWhenComplete: Boolean = false,
+        replaceRecord: Boolean = false
     ) {
         val generation = scanGeneration.incrementAndGet()
         fun updateIfCurrent(transform: OnboardingUiState.() -> OnboardingUiState) =
@@ -1073,7 +1078,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 else buildIntegrationCatalog(capabilities, report, handlers, previous).also { store.saveIntegrationOptions(deviceId, it) }
             }
             if (scanGeneration.get() != generation) return@launch
-            val adopted = if (current.onvifRecord == null && matchedCredentials != null) {
+            val adopted = if ((replaceRecord || current.onvifRecord == null) && matchedCredentials != null) {
                 withContext(Dispatchers.IO) { adoptScannedStreams(deviceId, address, report, matchedCredentials) }
             } else null
             updateIfCurrent {
@@ -1120,7 +1125,12 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         ).also(store::saveOnvifRecord)
     }
 
-    fun rescanNetwork() {
+    fun rescanNetwork() = scanNetwork(fresh = false)
+
+    /** Rescans without trusting the saved address or streams, for a device whose IP or services changed. */
+    fun refreshDevice() = scanNetwork(fresh = true)
+
+    private fun scanNetwork(fresh: Boolean) {
         val device = checkNotNull(current.activatedDevice) { "No device to scan" }
         val capabilities = checkNotNull(current.capabilities) { "No capabilities for ${device.deviceId}" }
         check(current.scanStatus == ScanStatus.IDLE) { "A scan is already running" }
@@ -1128,7 +1138,9 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         update { copy(scanStatus = ScanStatus.SCANNING, scanProgress = "Finding the device on the local network…", scanError = null) }
         viewModelScope.launch {
             val address = try {
-                withContext(Dispatchers.IO) { locate(device.deviceId, capabilities) }
+                withContext(Dispatchers.IO) {
+                    if (fresh) locate(device.deviceId, capabilities, savedRecord = null) else locate(device.deviceId, capabilities)
+                }
             } catch (exception: DeviceAddressException) {
                 update {
                     if (activatedDevice?.deviceId != device.deviceId || scanGeneration.get() != generation) this
@@ -1137,7 +1149,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 return@launch
             }
             if (scanGeneration.get() != generation) return@launch
-            launchNetworkScan(device.deviceId, capabilities, address)
+            launchNetworkScan(device.deviceId, capabilities, address, replaceRecord = fresh)
         }
     }
 
