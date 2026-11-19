@@ -149,7 +149,9 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     private val accountRepository by lazy { TuyaAccountRepository(application, store) }
     private val addressResolver = DeviceAddressResolver(application)
     private val sdkLock = kotlinx.coroutines.sync.Mutex()
-    private var activeTuyaAccount: TuyaAccount? = null
+    private var pairingAccount: TuyaAccount? = null
+    // Pairing re-prepares with the generated account as soon as a device is imported, while that device stays open.
+    private var deviceAccount: TuyaAccount? = null
     private val _uiState = kotlinx.coroutines.flow.MutableStateFlow(OnboardingUiState())
     private val importGeneration = AtomicLong(0)
     private val scanGeneration = AtomicLong(0)
@@ -212,6 +214,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                     ip = device.ip
                 )
                 store.saveCapabilities(device.devId, deviceCapabilities(device))
+                deviceAccount = pairingAccount
                 importDevice(activated)
             }
 
@@ -494,7 +497,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         pendingAfterReady = null
         pendingLookupUuid = null
         val account = store.loadOrCreateTuyaAccount()
-        activeTuyaAccount = account
+        pairingAccount = account
         activationRepository.prepare(
             CountryCodeProvider.current(getApplication()),
             account,
@@ -657,7 +660,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 hotspotError = null
             )
         }
-        activeTuyaAccount = account
+        pairingAccount = account
         activationRepository.prepare(CountryCodeProvider.current(getApplication()), account, auth)
     }
 
@@ -694,11 +697,9 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 hotspotError = null
             )
         }
-        activationRepository.prepare(
-            CountryCodeProvider.current(getApplication()),
-            store.loadOrCreateTuyaAccount(),
-            AccountAuth.LOGIN_OR_REGISTER
-        )
+        val account = store.loadOrCreateTuyaAccount()
+        pairingAccount = account
+        activationRepository.prepare(CountryCodeProvider.current(getApplication()), account, AccountAuth.LOGIN_OR_REGISTER)
     }
 
     private fun startBleActivation(device: TuyaBleDevice) {
@@ -806,7 +807,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun openDeviceSetup(device: ActivatedDevice, capabilities: DeviceCapabilities, account: TuyaAccount? = null) {
-        activeTuyaAccount = account
+        deviceAccount = account
 
         store.saveCapabilities(device.deviceId, capabilities)
         val existing = store.loadOnvifRecord(device.deviceId)
@@ -1362,7 +1363,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     private suspend fun readDeviceDataPoints(device: ActivatedDevice, ids: List<String>): Map<String, Any?> =
         sdkLock.withLock {
             check(ids.isNotEmpty()) { "At least one data-point ID is required" }
-            val account = checkNotNull(activeTuyaAccount) { "No Tuya account owns this device session" }
+            val account = checkNotNull(deviceAccount) { "No Tuya account owns this device session" }
             accountRepository.signIn(account)
             val sdk = com.thingclips.smart.home.sdk.ThingHomeSdk.newDeviceInstance(device.deviceId)
             awaitDataPointResult("Read data points", sdk) { callback -> sdk.getDpList(ids, callback) }
@@ -1374,7 +1375,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         }
 
     private suspend fun publishDataPoint(device: ActivatedDevice, id: String, value: Any) = sdkLock.withLock {
-        val account = checkNotNull(activeTuyaAccount) { "No Tuya account owns this device session" }
+        val account = checkNotNull(deviceAccount) { "No Tuya account owns this device session" }
         accountRepository.signIn(account)
         val sdk = com.thingclips.smart.home.sdk.ThingHomeSdk.newDeviceInstance(device.deviceId)
         val payload = com.alibaba.fastjson.JSON.toJSONString(mapOf(id to value))
