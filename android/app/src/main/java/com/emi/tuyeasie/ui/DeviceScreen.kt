@@ -56,7 +56,7 @@ import com.emi.tuyeasie.ui.theme.LocalHaBar
 @Composable
 fun DeviceScreen(state: OnboardingUiState, viewModel: OnboardingViewModel, onOpenSettings: () -> Unit, onRename: (String) -> Unit, onUnpair: () -> Unit) {
     val device = checkNotNull(state.activatedDevice) { "Device screen without a device" }
-    val busy = state.renaming || state.activationStatus == ActivationStatus.ACTIVATING || state.onvifStatus == OnvifStatus.CONFIGURING ||
+    val busy = state.renaming || state.removingIntegrations.isNotEmpty() || state.activationStatus == ActivationStatus.ACTIVATING || state.onvifStatus == OnvifStatus.CONFIGURING ||
         state.integrationOptions.any { it.status == IntegrationStatus.ADDING }
     val bar = LocalHaBar.current
     var menuOpen by remember { mutableStateOf(false) }
@@ -128,6 +128,7 @@ private fun RenameDialog(current: String, onRename: (String) -> Unit, onDismiss:
 @Composable
 private fun HomeAssistantIntegrationsCard(state: OnboardingUiState, viewModel: OnboardingViewModel, onOpenSettings: () -> Unit) {
     val uriHandler = LocalUriHandler.current
+    var removing by remember { mutableStateOf<String?>(null) }
     HaCard(title = "Home Assistant") {
         state.connectionError?.let { error ->
             EntityRow(icon = { EntityIcon(Icons.Outlined.Home, RowTone.FAILED) }, title = "Connection", state = error, tone = RowTone.FAILED) {
@@ -145,18 +146,21 @@ private fun HomeAssistantIntegrationsCard(state: OnboardingUiState, viewModel: O
                 IntegrationStatus.FAILED -> RowTone.FAILED
                 IntegrationStatus.AVAILABLE -> RowTone.NEUTRAL
             }
+            val beingRemoved = option.key in state.removingIntegrations
             EntityRow(
-                icon = { EntityIcon(categoryIcon(state.activatedDevice?.category), tone, busy = option.status == IntegrationStatus.ADDING) },
+                icon = { EntityIcon(categoryIcon(state.activatedDevice?.category), tone, busy = beingRemoved || option.status == IntegrationStatus.ADDING) },
                 title = option.label,
                 state = when {
+                    beingRemoved -> "Removing…"
                     option.status == IntegrationStatus.ADDING -> "Adding…"
                     option.status == IntegrationStatus.ADDED -> "Added to Home Assistant"
                     option.status == IntegrationStatus.FAILED -> checkNotNull(option.error)
                     else -> "Not added"
                 },
-                tone = tone
+                tone = tone,
+                onLongClick = if (option.status == IntegrationStatus.ADDED && !beingRemoved) { { removing = option.key } } else null
             ) {
-                when (option.status) {
+                if (!beingRemoved) when (option.status) {
                     IntegrationStatus.ADDED -> CardAction("Open", { viewModel.openIntegration(option.key, uriHandler::openUri) })
                     IntegrationStatus.ADDING -> Unit
                     IntegrationStatus.AVAILABLE, IntegrationStatus.FAILED -> CardAction("Add", { viewModel.addIntegration(option.key) })
@@ -166,6 +170,17 @@ private fun HomeAssistantIntegrationsCard(state: OnboardingUiState, viewModel: O
         state.scanError?.let { InlineError(it) }
     }
     if (state.integrationChooserVisible) IntegrationChooserDialog(state, viewModel)
+    removing?.let { key ->
+        AlertDialog(
+            onDismissRequest = { removing = null },
+            title = { Text("Remove from Home Assistant?") },
+            text = { Text("${state.integrationOptions.single { it.key == key }.label} will be removed from Home Assistant. The device stays paired.") },
+            confirmButton = {
+                TextButton(onClick = { removing = null; viewModel.removeIntegration(key) }) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { removing = null }) { Text("Cancel") } }
+        )
+    }
 }
 
 @Composable

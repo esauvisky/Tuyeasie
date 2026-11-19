@@ -396,7 +396,7 @@ class HomeAssistantClient(
         }
     }
 
-    private fun removeIntegrationEntry(entryId: String) {
+    fun removeIntegrationEntry(entryId: String) {
         try {
             httpRequest("DELETE", "/api/config/config_entries/entry/$entryId", null)
         } catch (error: HomeAssistantException) {

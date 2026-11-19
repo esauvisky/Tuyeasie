@@ -81,6 +81,7 @@ data class OnboardingUiState(
     val integrationChooserVisible: Boolean = false,
     val notice: String? = null,
     val renaming: Boolean = false,
+    val removingIntegrations: Set<String> = emptySet(),
     val settings: AppSettings = AppSettings(),
     val testingConnection: Boolean = false,
     val connectionVerified: Boolean = false,
@@ -128,6 +129,7 @@ private fun OnboardingUiState.withoutDeviceState() = copy(
     integrationChooserVisible = false,
     chooserSelection = emptySet(),
     integrationOptions = emptyList(),
+    removingIntegrations = emptySet(),
     manualDataPoints = emptyMap(),
     onvifProgress = null,
     onvifStatus = OnvifStatus.IDLE,
@@ -841,7 +843,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     private fun deviceScreenBusy() = current.deviceScreenOpen && (
-        current.renaming ||
+        current.renaming || current.removingIntegrations.isNotEmpty() ||
         current.activationStatus == ActivationStatus.IMPORTING ||
             current.onvifStatus == OnvifStatus.CONFIGURING ||
             current.integrationOptions.any { it.status == IntegrationStatus.ADDING }
@@ -1304,6 +1306,30 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 if (key == IntegrationKeys.TUYA_LOCAL && e.error == HomeAssistantError.UNSUPPORTED_PROFILE) {
                     failIntegration(key, "Tuya Local has no profile for product ${device.productId}.")
                 } else failIntegration(key, e.publicMessage)
+            }
+        }
+    }
+
+    /** Deletes the Home Assistant entry made for one integration; the device itself stays paired. */
+    fun removeIntegration(key: String) {
+        val device = checkNotNull(current.activatedDevice) { "No device for integration" }
+        val option = current.integrationOptions.single { it.key == key }
+        check(option.status == IntegrationStatus.ADDED) { "$key is not added to Home Assistant" }
+        val entryId = checkNotNull(option.entryId) { "Added integration $key has no entry ID" }
+        update { copy(removingIntegrations = removingIntegrations + key) }
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) { homeAssistantClient.removeIntegrationEntry(entryId) }
+            } catch (e: HomeAssistantException) {
+                update { copy(removingIntegrations = removingIntegrations - key, notice = "Not removed from Home Assistant: ${e.publicMessage}") }
+                return@launch
+            }
+            val removed = option.copy(status = IntegrationStatus.AVAILABLE, entryId = null, deviceRegistryId = null, openUrl = null,
+                error = null, updatedAt = System.currentTimeMillis())
+            withContext(Dispatchers.IO) { store.updateIntegrationOption(device.deviceId, removed) }
+            update {
+                if (activatedDevice?.deviceId != device.deviceId) this
+                else copy(removingIntegrations = removingIntegrations - key, integrationOptions = integrationOptions.map { if (it.key == key) removed else it })
             }
         }
     }
