@@ -1,97 +1,51 @@
 # Tuyeasie
 
-Tuya will sell you a plug, then charge you a developer account, a cloud project, and a support ticket before it admits the thing has a local key. Tuyeasie skips that. Pair the device from your phone, pick how it goes into Home Assistant, and it lands there, key included. No Smart Life account, no IoT portal, no `tinytuya wizard`.
+Tuya will sell you a smart plug, then ask for a developer account, a cloud project and an expiring API trial before it admits the thing has a local key. Tuyeasie skips that part.
 
-https://github.com/user-attachments/assets/b059be73-5cae-42ae-8090-d10219f59be8
+It is an Android app that pairs a Tuya device from your phone and adds it to Home Assistant with local control. No Smart Life account, no IoT portal, no `tinytuya wizard`.
 
-## Download
+<!-- VIDEO: paste the GitHub user-attachments link on the next line -->
 
-Grab the APK from [GitHub Reeleases](https://github.com/esauvisky/Tuyeasie/releases) and install it.
+## Quick start
 
-## Set it up
+1. Install [Tuya Local](https://github.com/make-all/tuya-local) in Home Assistant.
+2. In Home Assistant, create a long-lived access token on an administrator account.
+3. Install the APK from [GitHub Releases](https://github.com/esauvisky/Tuyeasie/releases).
+4. In the app, open Settings and enter the Home Assistant URL, the token, and the 2.4 GHz Wi-Fi your devices should join.
+5. Open Pair, reset the device until it blinks fast, tap it, and give it a name.
+6. Tick the integrations you want and press Add.
 
-1. Install [Tuya Local](https://github.com/make-all/tuya-local) in Home Assistant. The stock one is what you want for plugs, bulbs, and sensors.
-2. Make an administrator long-lived access token.
-3. In the app, open Settings. Home Assistant URL, the token, and the 2.4 GHz Wi-Fi the device should join.
-4. Open Pair. Reset the device until it blinks fast, then tap it.
-5. Wait for the scan, then pick the integrations you want. Skip is fine; you can add them later from the device screen.
+The phone and Home Assistant must be on the same network. Pairing uses the internet once; after that the device is controlled locally.
 
-The phone and Home Assistant need to be on the same network. Pairing uses the internet once. After that the device is controlled locally, which was the point.
+## Features
 
-## What it does after pairing
+- **Pair from your phone.** Bluetooth and Wi-Fi hotspot pairing, without Smart Life or a Tuya developer account. The app creates a Tuya account in the background, or asks for one when the device needs it.
+- **Add to Home Assistant.** Works with devices supported by [Tuya Local](https://github.com/make-all/tuya-local), with additional ONVIF and RTSP support for cameras. The app checks both the device's capabilities and your installed integrations before offering setup options.
+- **See what is on your network.** Automatic IP discovery, online status, and a full TCP port scan that identifies the services answering on each open port.
+- **Read and write data points.** View the device's schema and live values, with controls for booleans, enums, numbers, bitmaps, strings and raw hex.
+- **Access device information.** Copy local keys, device IDs, product IDs and network details without a separate tool.
+- **Move settings between devices.** Export Tuya accounts, Home Assistant, Wi-Fi and camera settings, then import them on another phone or tablet. Secrets can be encrypted with your own passphrase; without one, the file uses an extractable app-wide key.
 
-The app looks at what the device actually is before offering anything. It reads the Tuya data point schema, finds the device on the LAN, checks all 65535 TCP ports, and probes ONVIF and RTSP. Then it asks Home Assistant which config flows are installed and offers only what both sides can do:
+## Cameras
 
-- **Tuya Local** when the device speaks the local Tuya protocol and has data points.
-- **ONVIF** when an ONVIF service answers.
-- **Generic Camera**, one per verified RTSP stream, main and substream separately.
+Tuyeasie is not just for cameras, but they get extra attention. It discovers ONVIF services and RTSP streams automatically, including main and substreams, and enables ONVIF during pairing when the camera exposes a supported switch for it.
 
-Tick the ones you want and add them in one go. Anything that cannot be added is simply not offered. One device can have several integrations at once, each with its own Add, Open, or error state. Open jumps to it in Home Assistant.
+Choose how each camera goes into Home Assistant:
 
-The device screen also has:
+- **Tuya Local** for device controls and settings.
+- **ONVIF** for the camera's supported video and control features.
+- **Generic Camera** for each verified RTSP stream, with entity IDs derived from the device name, such as `camera.garage_camera` and `camera.garage_camera_substream`.
 
-- **Data points.** Opens its own screen with every DP in the schema, split into controls and read-only status, with live values and units. Flip a switch, pick from an enum, or type a number within its min and max, and it is written straight to the device.
-- **Network.** LAN address and how it was found, MAC, and each open port named by what actually answered on it (video stream, ONVIF, web page, Tuya local control), plus whether it wants a login.
-- **Details.** Device ID, local key, product ID, category, protocol version. All copyable.
-- **Advanced.** ONVIF service URL, RTSP URLs, and the ONVIF login the app should use.
-
-The Devices tab lists everything on every Tuya account saved on the phone. Long-press a device to copy its ID or local key, or to unpair it. Unpair removes every Home Assistant entry the device has, then removes it from Tuya.
-
-Settings has an encrypted backup of accounts, Home Assistant, Wi-Fi, devices, and camera logins. Set a passphrase to make it yours. Leave it empty and it is sealed with a key built into the app, which anyone with the APK can pull out.
+These can be combined: use Tuya Local for controls and ONVIF or Generic Camera for video, or add several integrations for the same device.
 
 ## Limitations
 
 - Android only.
-- The device has to be in pairing mode. If it already lives in Smart Life, remove it there first.
-- Someone has to hold the phone next to the device.
-- Some camera firmware sends broken ONVIF XML. The app repairs it for its own probe, but Home Assistant's ONVIF integration may still time out on it. Use Generic Camera for those.
-
-## Tuya security cameras
-
-Stock Tuya Local will take the camera and its controls, but it will not play the video on that same HASS device. This repo contains an overlay that adds it: main stream, substream, and the pan controls, all in one device.
-
-1. Install stock [Tuya Local](https://github.com/make-all/tuya-local) first. The overlay is only the changed files, not a full integration.
-2. Copy `tuya-local/custom_components/tuya_local/` from this repo over `config/custom_components/tuya_local/` on the Home Assistant machine.
-3. Restart Home Assistant.
-4. Pair the camera in the app and pick Tuya Local. The ONVIF streams the scan found are passed along with it.
-
-Cameras that have ONVIF behind Tuya data points get it switched on during pairing, before the scan, so ONVIF and RTSP show up as options too. The default login is `admin`/`admin`; a new ONVIF password can be set from the device screen under Advanced.
-
-The overlay is based on tuya-local 2026.10.0 and keeps that project's license in `tuya-local/LICENSE.md`. Details in `tuya-local/README.md`. Without it, add the video with ONVIF or Generic Camera instead.
-
-## Build
-
-JDK 17, Android SDK 35, and a Tuya Smart Life App SDK key. That key is the one piece of Tuya's process this app cannot dodge, and it is baked into the APK, not typed in by whoever installs it.
-
-`android/local.properties`:
-
-```properties
-appKey=your_tuya_app_key
-appSecret=your_tuya_app_secret
-```
-
-Release signing uses the same keystore locally and in CI. Create it once:
-
-```bash
-keytool -genkeypair -v -keystore android/release.keystore -alias tuyeasie \
-  -keyalg RSA -keysize 2048 -validity 10000
-```
-
-`android/keystore.properties`, which is gitignored, next to it:
-
-```properties
-storeFile=release.keystore
-storePassword=your_store_password
-keyAlias=tuyeasie
-keyPassword=your_key_password
-```
-
-```bash
-cd android
-./gradlew assembleDebug
-./gradlew installDebug
-```
+- The device must be in pairing mode. If it is already in Smart Life, remove it there first.
+- The phone must be near the device while pairing.
+- Some camera firmware returns malformed ONVIF XML. The app repairs it for its own probing, but Home Assistant's ONVIF integration may still time out on it. Use Generic Camera for those cameras.
+- The app includes a Tuya App SDK key, which Tuya's SDK requires.
 
 ## License
 
-[MIT](LICENSE).
+MIT. The overlay keeps tuya-local's license in `tuya-local/LICENSE.md`.
