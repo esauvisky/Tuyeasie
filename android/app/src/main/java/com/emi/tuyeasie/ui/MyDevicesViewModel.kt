@@ -32,7 +32,7 @@ data class AccountDevicesState(
 )
 
 sealed interface MyDevicesConfirmation {
-    data class Unpair(val saved: SavedTuyaAccount, val device: TuyaManagedDevice) : MyDevicesConfirmation
+    data class Unpair(val saved: SavedTuyaAccount, val device: TuyaManagedDevice, val removeFromHomeAssistant: Boolean = true) : MyDevicesConfirmation
     data class Forget(val saved: SavedTuyaAccount) : MyDevicesConfirmation
 }
 
@@ -148,6 +148,11 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
     fun requestUnpair(saved: SavedTuyaAccount, device: TuyaManagedDevice) =
         _uiState.update { it.copy(confirmation = MyDevicesConfirmation.Unpair(saved, device)) }
 
+    fun toggleUnpairHomeAssistant() = _uiState.update {
+        val unpair = it.confirmation as MyDevicesConfirmation.Unpair
+        it.copy(confirmation = unpair.copy(removeFromHomeAssistant = !unpair.removeFromHomeAssistant))
+    }
+
     fun requestForget(saved: SavedTuyaAccount) =
         _uiState.update { it.copy(confirmation = MyDevicesConfirmation.Forget(saved)) }
 
@@ -169,7 +174,7 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
         val device = confirmation.device
         _uiState.update { it.copy(unpairingDeviceId = device.deviceId, actionError = null) }
         viewModelScope.launch {
-            if (store.loadSettings().hassUrl.isNotBlank()) {
+            if (confirmation.removeFromHomeAssistant && store.loadSettings().hassUrl.isNotBlank()) {
                 try {
                     withContext(Dispatchers.IO) {
                         homeAssistantClient.removeDevice(

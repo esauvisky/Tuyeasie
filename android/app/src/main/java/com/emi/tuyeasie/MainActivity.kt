@@ -80,6 +80,7 @@ class MainActivity : ComponentActivity() {
                 val bar = LocalHaBar.current
                 var deviceSource by remember { mutableStateOf<Pair<SavedTuyaAccount, TuyaManagedDevice>?>(null) }
                 var pendingUnpair by remember { mutableStateOf<Pair<SavedTuyaAccount, TuyaManagedDevice>?>(null) }
+                var unpairFromHomeAssistant by remember { mutableStateOf(true) }
                 LaunchedEffect(state.permissionRequestVersion) {
                     if (state.permissionRequestVersion > 0) {
                         scanPermissions.launch(requiredScanPermissions())
@@ -153,20 +154,26 @@ class MainActivity : ComponentActivity() {
                         state,
                         viewModel,
                         onOpenSettings = { viewModel.closeDeviceScreen(); tab = Tab.SETTINGS },
-                        onUnpair = source?.let { (account, device) -> { pendingUnpair = account to device } }
+                        onUnpair = source?.let { (account, device) -> { unpairFromHomeAssistant = true; pendingUnpair = account to device } }
                     )
                 }
                 pendingUnpair?.let { (account, device) ->
                     androidx.compose.material3.AlertDialog(
                         onDismissRequest = { pendingUnpair = null },
                         title = { Text("Unpair device?") },
-                        text = { Text("${device.name} and all of its Home Assistant integrations will be removed. A factory reset may be needed before pairing again.") },
+                        text = {
+                            Column {
+                                Text("${device.name} will be removed from its Tuya account. A factory reset may be needed before pairing again.")
+                                com.emi.tuyeasie.ui.CheckRow("Also remove it from Home Assistant", unpairFromHomeAssistant) { unpairFromHomeAssistant = !unpairFromHomeAssistant }
+                            }
+                        },
                         confirmButton = {
                             androidx.compose.material3.TextButton(onClick = {
                                 pendingUnpair = null
                                 viewModel.closeDeviceScreen()
                                 tab = Tab.DEVICES
                                 myDevicesViewModel.requestUnpair(account, device)
+                                if (!unpairFromHomeAssistant) myDevicesViewModel.toggleUnpairHomeAssistant()
                                 myDevicesViewModel.confirm()
                             }) { Text("Unpair") }
                         },

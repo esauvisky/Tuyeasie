@@ -106,7 +106,7 @@ fun DevicesScreen(
             }
         }
     }
-    state.confirmation?.let { ConfirmationDialog(it, viewModel::confirm, viewModel::dismissConfirmation) }
+    state.confirmation?.let { ConfirmationDialog(it, viewModel::confirm, viewModel::toggleUnpairHomeAssistant, viewModel::dismissConfirmation) }
 }
 
 // Numbering follows device ID so a device keeps its suffix across refreshes; the name also reaches Home Assistant.
@@ -165,7 +165,7 @@ fun AccountsCard(viewModel: MyDevicesViewModel) {
             onDismiss = viewModel::dismissAddAccount
         )
     }
-    state.confirmation?.let { ConfirmationDialog(it, viewModel::confirm, viewModel::dismissConfirmation) }
+    state.confirmation?.let { ConfirmationDialog(it, viewModel::confirm, viewModel::toggleUnpairHomeAssistant, viewModel::dismissConfirmation) }
 }
 
 @Composable
@@ -215,12 +215,12 @@ private fun AddAccountDialog(
 }
 
 @Composable
-private fun ConfirmationDialog(confirmation: MyDevicesConfirmation, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+private fun ConfirmationDialog(confirmation: MyDevicesConfirmation, onConfirm: () -> Unit, onToggleHomeAssistant: () -> Unit, onDismiss: () -> Unit) {
     val (title, body, action) = when (confirmation) {
         is MyDevicesConfirmation.Unpair -> Triple(
             "Unpair device?",
-            "\"${confirmation.device.name}\" (${confirmation.device.deviceId}) will be removed from Home Assistant " +
-                "and from ${confirmation.saved.account.uid}. A factory reset may be required to pair it again.",
+            "\"${confirmation.device.name}\" (${confirmation.device.deviceId}) will be removed from " +
+                "${confirmation.saved.account.uid}. A factory reset may be required to pair it again.",
             "Unpair"
         )
         is MyDevicesConfirmation.Forget -> Triple(
@@ -233,7 +233,14 @@ private fun ConfirmationDialog(confirmation: MyDevicesConfirmation, onConfirm: (
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
-        text = { Text(body) },
+        text = {
+            Column {
+                Text(body)
+                if (confirmation is MyDevicesConfirmation.Unpair) {
+                    CheckRow("Also remove it from Home Assistant", confirmation.removeFromHomeAssistant, onToggleHomeAssistant)
+                }
+            }
+        },
         confirmButton = { TextButton(onClick = onConfirm) { Text(action, color = MaterialTheme.colorScheme.error) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
     )
