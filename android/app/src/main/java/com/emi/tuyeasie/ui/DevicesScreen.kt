@@ -125,12 +125,14 @@ fun AccountsCard(viewModel: MyDevicesViewModel) {
     ) {
         if (state.accounts.isEmpty()) CardText("No accounts yet. One is created when you pair your first device.")
         state.accounts.forEach { entry ->
+            val linked = entry.devices.orEmpty().size
             EntityRow(
                 icon = { EntityIcon(Icons.Outlined.AccountCircle, RowTone.NEUTRAL) },
                 title = entry.saved.account.uid,
-                state = entry.saved.kind.label
+                state = if (linked == 0) entry.saved.kind.label
+                else "${entry.saved.kind.label} · $linked ${if (linked == 1) "device" else "devices"}, unpair to forget"
             ) {
-                CardAction("Forget", { viewModel.requestForget(entry.saved) }, enabled = !entry.loading)
+                CardAction("Forget", { viewModel.requestForget(entry.saved) }, enabled = !entry.loading && linked == 0)
             }
         }
     }

@@ -104,6 +104,14 @@ class SecureSettingsStore(context: Context) {
         return account
     }
 
+    fun saveGeneratedTuyaAccount(account: TuyaAccount) {
+        val committed = preferences.edit()
+            .putString(KEY_TUYA_UID, account.uid)
+            .putString(KEY_TUYA_PASSWORD, account.password)
+            .commit()
+        check(committed) { "Unable to persist Tuya account" }
+    }
+
     fun loadCameraAccount(): TuyaAccount? {
         val uid = preferences.getString(KEY_CAMERA_EMAIL, null) ?: return null
         return TuyaAccount(uid, checkNotNull(preferences.getString(KEY_CAMERA_PASSWORD, null)) {

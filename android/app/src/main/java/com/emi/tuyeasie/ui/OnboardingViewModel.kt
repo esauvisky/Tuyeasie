@@ -444,6 +444,18 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
 
     fun toggleLocalKeyVisibility() = update { copy(showLocalKey = !showLocalKey) }
 
+    /** Picks up the settings and accounts an import just wrote to storage. */
+    fun reloadSettings() {
+        check(!current.busy) { "Settings cannot be reloaded while the app is busy" }
+        viewModelScope.launch {
+            val settings = withContext(Dispatchers.IO) { store.loadSettings() }
+            update { copy(settings = settings) }
+            // Pairing is signed in with the account that was saved before the import.
+            if (current.stage == PairStage.NEARBY) enterNearby()
+            if (validateSettings(settings) == null) testConnection()
+        }
+    }
+
     fun testConnection() {
         val settings = normalizedSettings()
         val validationError = validateSettings(settings)

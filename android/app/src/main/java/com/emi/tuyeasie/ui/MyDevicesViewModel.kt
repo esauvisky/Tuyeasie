@@ -4,10 +4,11 @@ import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.emi.tuyeasie.data.BackupExporter
 import com.emi.tuyeasie.data.PortScanner
 import com.emi.tuyeasie.data.SavedTuyaAccount
 import com.emi.tuyeasie.data.SecureSettingsStore
+import com.emi.tuyeasie.data.SettingsBackup
+import com.emi.tuyeasie.data.SettingsFileException
 import com.emi.tuyeasie.data.TuyaAccountKind
 import com.emi.tuyeasie.data.TuyaAccountRepository
 import com.emi.tuyeasie.data.TuyaManagedDevice
@@ -63,7 +64,14 @@ data class MyDevicesUiState(
     val backupExportPending: Boolean = false,
     val exportingBackup: Boolean = false,
     val backupError: String? = null,
-    val backupExported: Boolean = false
+    val backupExported: Boolean = false,
+    // The chosen settings file, held until the import is confirmed.
+    val importJson: String? = null,
+    val importNeedsPassphrase: Boolean = false,
+    val importPassphrase: String = "",
+    val importing: Boolean = false,
+    val importError: String? = null,
+    val settingsImported: Boolean = false
 )
 
 const val MIN_BACKUP_PASSPHRASE_LENGTH = 8
@@ -100,7 +108,7 @@ fun nextDeviceName(name: String, taken: Collection<String>): String {
 class MyDevicesViewModel(application: Application) : AndroidViewModel(application) {
     private val store = SecureSettingsStore(application)
     private val repository = TuyaAccountRepository(application, store)
-    private val backupExporter = BackupExporter(store)
+    private val settingsBackup = SettingsBackup(store)
     private val homeAssistantClient = HomeAssistantClient(store)
     // The Tuya SDK holds a single signed-in user, so sign-in + operation pairs must not interleave.
     private val sdkLock = Mutex()
@@ -241,8 +249,11 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
         it.copy(confirmation = unpair.copy(removeFromHomeAssistant = !unpair.removeFromHomeAssistant))
     }
 
-    fun requestForget(saved: SavedTuyaAccount) =
+    fun requestForget(saved: SavedTuyaAccount) {
+        // Forgetting the account would leave its devices paired with no way to manage or unpair them here.
+        check(_uiState.value.accounts.single { it.saved == saved }.devices.isNullOrEmpty()) { "${saved.account.uid} still has devices" }
         _uiState.update { it.copy(confirmation = MyDevicesConfirmation.Forget(saved)) }
+    }
 
     fun dismissConfirmation() = _uiState.update { it.copy(confirmation = null) }
 
@@ -315,14 +326,14 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
         _uiState.update { it.copy(backupPassphrase = "", backupPassphraseConfirm = "", backupExportPending = false) }
         if (uri == null) return
         if (!state.backupExportPending) {
-            _uiState.update { it.copy(backupError = "The app restarted while choosing the file. Export the backup again.") }
+            _uiState.update { it.copy(backupError = "The app restarted while choosing the file. Export the settings again.") }
             return
         }
         val passphrase = state.backupPassphrase.ifEmpty { null }
         val accounts = repository.savedAccounts()
         _uiState.update { it.copy(exportingBackup = true, backupError = null, backupExported = false) }
         viewModelScope.launch {
-            val json = withContext(Dispatchers.Default) { backupExporter.export(passphrase, accounts) }
+            val json = withContext(Dispatchers.Default) { settingsBackup.export(passphrase, accounts) }
             try {
                 withContext(Dispatchers.IO) {
                     val output = checkNotNull(getApplication<Application>().contentResolver.openOutputStream(uri, "wt")) {
@@ -331,10 +342,52 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
                     output.use { it.write(json.toByteArray(Charsets.UTF_8)) }
                 }
             } catch (e: IOException) {
-                _uiState.update { it.copy(exportingBackup = false, backupError = "Could not write the backup: ${e.message}") }
+                _uiState.update { it.copy(exportingBackup = false, backupError = "Could not write the settings file: ${e.message}") }
                 return@launch
             }
             _uiState.update { it.copy(exportingBackup = false, backupExported = true) }
+        }
+    }
+
+    fun onImportFileChosen(uri: Uri?) {
+        if (uri == null) return
+        _uiState.update { it.copy(backupError = null, backupExported = false, settingsImported = false) }
+        viewModelScope.launch {
+            try {
+                val json = withContext(Dispatchers.IO) {
+                    val input = checkNotNull(getApplication<Application>().contentResolver.openInputStream(uri)) { "No input stream for $uri" }
+                    input.use { it.readBytes().toString(Charsets.UTF_8) }
+                }
+                val needsPassphrase = settingsBackup.needsPassphrase(json)
+                _uiState.update { it.copy(importJson = json, importNeedsPassphrase = needsPassphrase, importPassphrase = "", importError = null) }
+            } catch (e: IOException) {
+                _uiState.update { it.copy(backupError = "Could not read the settings file: ${e.message}") }
+            } catch (e: SettingsFileException) {
+                _uiState.update { it.copy(backupError = e.message) }
+            }
+        }
+    }
+
+    fun onImportPassphraseChange(value: String) = _uiState.update { it.copy(importPassphrase = value, importError = null) }
+
+    fun dismissImport() = _uiState.update { it.copy(importJson = null, importPassphrase = "", importError = null) }
+
+    fun confirmImport(onImported: () -> Unit) {
+        val state = _uiState.value
+        val json = checkNotNull(state.importJson) { "No settings file is waiting to be imported" }
+        check(!state.importing) { "An import is already running" }
+        val passphrase = if (state.importNeedsPassphrase) state.importPassphrase else null
+        _uiState.update { it.copy(importing = true, importError = null) }
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.Default) { settingsBackup.restore(json, passphrase) }
+            } catch (e: SettingsFileException) {
+                _uiState.update { it.copy(importing = false, importError = e.message) }
+                return@launch
+            }
+            _uiState.update { it.copy(importing = false, importJson = null, importPassphrase = "", settingsImported = true) }
+            refresh()
+            onImported()
         }
     }
 }

@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -79,16 +80,25 @@ private fun SetupCard(state: OnboardingUiState, viewModel: OnboardingViewModel) 
         HomeAssistantFields(state, viewModel)
         WifiFields(state, viewModel)
         state.connectionError?.let { InlineError(it) }
-        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
-            if (state.testingConnection) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-            CardAction("Connect", viewModel::testConnection, enabled = !state.testingConnection)
-        }
+        HomeAssistantActions(state, viewModel, "Connect")
+    }
+}
+
+// The 4dp inset puts the buttons' text on the same 16dp edge as the fields above them.
+@Composable
+fun HomeAssistantActions(state: OnboardingUiState, viewModel: OnboardingViewModel, action: String) {
+    val uriHandler = LocalUriHandler.current
+    val hassUrl = state.settings.hassUrl.trim()
+    Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (hassUrl.isNotEmpty()) CardAction("Create a token", { uriHandler.openUri(hassUrl.trimEnd('/') + "/profile/security") })
+        Spacer(Modifier.weight(1f))
+        if (state.testingConnection) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+        CardAction(action, viewModel::testConnection, enabled = !state.testingConnection)
     }
 }
 
 @Composable
 fun HomeAssistantFields(state: OnboardingUiState, viewModel: OnboardingViewModel) {
-    val uriHandler = LocalUriHandler.current
     Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedTextField(
             value = state.settings.hassUrl,
@@ -110,12 +120,6 @@ fun HomeAssistantFields(state: OnboardingUiState, viewModel: OnboardingViewModel
             visualTransformation = PasswordVisualTransformation(),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password)
         )
-        val hassUrl = state.settings.hassUrl.trim()
-        if (hassUrl.isNotEmpty()) {
-            TextButton(onClick = { uriHandler.openUri(hassUrl.trimEnd('/') + "/profile/security") }) {
-                Text("Create a token in Home Assistant")
-            }
-        }
     }
 }
 
