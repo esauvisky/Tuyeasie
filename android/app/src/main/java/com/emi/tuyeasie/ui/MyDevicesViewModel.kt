@@ -15,6 +15,7 @@ import com.emi.tuyeasie.hass.HomeAssistantClient
 import com.emi.tuyeasie.hass.HomeAssistantException
 import java.io.IOException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -44,6 +45,8 @@ data class MyDevicesUiState(
     val adding: Boolean = false,
     val addError: String? = null,
     val confirmation: MyDevicesConfirmation? = null,
+    // True from the start of a refresh until every account is loaded and duplicate names are numbered.
+    val refreshing: Boolean = false,
     val unpairingDeviceId: String? = null,
     val actionError: String? = null,
     val backupDialogOpen: Boolean = false,
@@ -59,6 +62,35 @@ data class MyDevicesUiState(
 
 const val MIN_BACKUP_PASSPHRASE_LENGTH = 8
 
+// Tuya lets several devices share a name, but Home Assistant entries are told apart by it. Numbering follows device ID.
+fun numberedDuplicateNames(devices: List<TuyaManagedDevice>): Map<String, String> {
+    val taken = devices.map { it.name }.toMutableSet()
+    return devices.groupBy { it.name }
+        .filterValues { it.size > 1 }
+        .flatMap { (name, group) ->
+            var number = 0
+            group.sortedBy { it.deviceId }.map { device ->
+                var candidate: String
+                do {
+                    number++
+                    candidate = "$name $number"
+                } while (candidate in taken)
+                taken += candidate
+                device.deviceId to candidate
+            }
+        }
+        .toMap()
+}
+
+/** The default name of a newly paired device: its own, or the number after the last device already called that. */
+fun nextDeviceName(name: String, taken: Collection<String>): String {
+    val numbers = taken.mapNotNull { other ->
+        if (other == name) 1
+        else other.removePrefix("$name ").takeIf { it != other && it.all(Char::isDigit) }?.toIntOrNull()
+    }
+    return if (numbers.isEmpty()) name else "$name ${numbers.max() + 1}"
+}
+
 class MyDevicesViewModel(application: Application) : AndroidViewModel(application) {
     private val store = SecureSettingsStore(application)
     private val repository = TuyaAccountRepository(application, store)
@@ -66,6 +98,7 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
     private val homeAssistantClient = HomeAssistantClient(store)
     // The Tuya SDK holds a single signed-in user, so sign-in + operation pairs must not interleave.
     private val sdkLock = Mutex()
+    private var refreshJob: Job? = null
     private val _uiState = MutableStateFlow(MyDevicesUiState())
     val uiState: StateFlow<MyDevicesUiState> = _uiState.asStateFlow()
 
@@ -83,11 +116,48 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
                         ?: store.loadCachedDevices(account.account.uid)
                     AccountDevicesState(account, loading = true, devices = cached)
                 },
+                refreshing = true,
                 actionError = null
             )
         }
-        viewModelScope.launch {
+        // A newer refresh replaces one still running, so the list never settles on the older answer.
+        refreshJob?.cancel()
+        refreshJob = viewModelScope.launch {
             saved.forEach { loadDevices(it) }
+            saveNumberedNames()
+            _uiState.update { it.copy(refreshing = false) }
+        }
+    }
+
+    // Saved to Tuya once, so a device paired later can never shift the numbers of the ones already there.
+    private suspend fun saveNumberedNames() {
+        val accounts = _uiState.value.accounts
+        // A failed account shows its cached list, which may no longer match Tuya.
+        if (accounts.any { it.error != null }) return
+        val owners = accounts.flatMap { entry -> entry.devices.orEmpty().map { it to entry.saved } }
+        val names = numberedDuplicateNames(owners.map { it.first })
+        for ((device, saved) in owners) {
+            val name = names[device.deviceId] ?: continue
+            try {
+                sdkLock.withLock { repository.renameDevice(saved.account, device.deviceId, name) }
+            } catch (e: TuyaSdkException) {
+                _uiState.update { it.copy(actionError = "\"${device.name}\" could not be numbered: ${e.message}") }
+                return
+            }
+            val renamed = device.copy(name = name, activated = device.activated.copy(name = name))
+            val devices = checkNotNull(_uiState.value.accounts.single { it.saved == saved }.devices)
+                .map { if (it.deviceId == device.deviceId) renamed else it }
+            updateAccount(saved) { it.copy(devices = devices) }
+            val titles = withContext(Dispatchers.IO) {
+                store.saveCachedDevices(saved.account.uid, devices)
+                entryTitles(name, store.loadIntegrationOptions(device.deviceId))
+            }
+            if (titles.isEmpty()) continue
+            try {
+                withContext(Dispatchers.IO) { homeAssistantClient.renameEntries(titles) }
+            } catch (e: HomeAssistantException) {
+                _uiState.update { it.copy(actionError = "$name was renamed in Tuya, but not in Home Assistant: ${e.publicMessage}") }
+            }
         }
     }
 

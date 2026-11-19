@@ -54,7 +54,7 @@ import com.emi.tuyeasie.ui.theme.LocalHaBar
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DeviceScreen(state: OnboardingUiState, viewModel: OnboardingViewModel, onOpenSettings: () -> Unit, onRename: (String) -> Unit, onUnpair: () -> Unit) {
+fun DeviceScreen(state: OnboardingUiState, viewModel: OnboardingViewModel, onOpenSettings: () -> Unit, onRename: (String, Boolean) -> Unit, onUnpair: () -> Unit) {
     val device = checkNotNull(state.activatedDevice) { "Device screen without a device" }
     val busy = state.renaming || state.removingIntegrations.isNotEmpty() || state.activationStatus == ActivationStatus.ACTIVATING || state.onvifStatus == OnvifStatus.CONFIGURING ||
         state.integrationOptions.any { it.status == IntegrationStatus.ADDING }
@@ -104,12 +104,13 @@ fun DeviceScreen(state: OnboardingUiState, viewModel: OnboardingViewModel, onOpe
             AdvancedCard(state, viewModel)
         }
     }
-    if (renameOpen) RenameDialog(device.name, onRename) { renameOpen = false }
+    if (renameOpen) RenameDialog(device.name, state.integrationOptions.any { it.entryId != null }, onRename) { renameOpen = false }
 }
 
 @Composable
-private fun RenameDialog(current: String, onRename: (String) -> Unit, onDismiss: () -> Unit) {
+private fun RenameDialog(current: String, inHomeAssistant: Boolean, onRename: (String, Boolean) -> Unit, onDismiss: () -> Unit) {
     var name by remember { mutableStateOf(current) }
+    var entityIds by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Rename device") },
@@ -117,10 +118,12 @@ private fun RenameDialog(current: String, onRename: (String) -> Unit, onDismiss:
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedTextField(name, { name = it }, label = { Text("Name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 Text("The name changes in Tuya and on everything added to Home Assistant.", style = MaterialTheme.typography.bodyMedium)
+                if (inHomeAssistant) CheckRow("Also change Home Assistant entity IDs", entityIds) { entityIds = !entityIds }
+                if (entityIds) Text("Automations and dashboards that use the old IDs will need updating.", style = MaterialTheme.typography.bodyMedium)
             }
         },
         confirmButton = {
-            TextButton(onClick = { onDismiss(); onRename(name.trim()) }, enabled = name.isNotBlank() && name.trim() != current) { Text("Rename") }
+            TextButton(onClick = { onDismiss(); onRename(name.trim(), entityIds) }, enabled = name.isNotBlank() && name.trim() != current) { Text("Rename") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
     )

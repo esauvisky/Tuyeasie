@@ -171,4 +171,16 @@ class HomeAssistantClientTest {
         )
         assertEquals("Home Assistant aborted the ONVIF setup (unique_id_mismatch).", otherAbort.publicMessage)
     }
+
+    @Test
+    fun buildsEntitySlugsAndNumbersTakenIds() {
+        assertEquals("garage_camera_2", HomeAssistantProtocol.entitySlug("  Garage Camera #2 "))
+        assertEquals("camera_do_portao", HomeAssistantProtocol.entitySlug("Câmera do Portão"))
+        assertEquals("", HomeAssistantProtocol.entitySlug("摄像头"))
+        assertEquals("camera.garage", HomeAssistantProtocol.freeEntityId("camera.garage", setOf("camera.other")))
+        assertEquals(
+            "camera.garage_3",
+            HomeAssistantProtocol.freeEntityId("camera.garage", setOf("camera.garage", "camera.garage_2"))
+        )
+    }
 }

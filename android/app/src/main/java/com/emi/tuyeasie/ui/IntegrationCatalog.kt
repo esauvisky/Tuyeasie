@@ -41,4 +41,15 @@ private fun streamLabel(index: Int) = when (index) {
     else -> "Camera (stream ${index + 1})"
 }
 
+/** The Home Assistant entry title of each added integration for a device with this name; extra streams keep their suffix. */
+fun entryTitles(name: String, options: List<HaIntegrationOption>): Map<String, String> =
+    options.filter { it.entryId != null }.associate { option ->
+        val title = when {
+            option.key == "generic:1" -> "$name Substream"
+            option.key.startsWith("generic:") -> "$name Stream ${option.key.substringAfter(':').toInt() + 1}"
+            else -> name
+        }
+        checkNotNull(option.entryId) to title
+    }
+
 fun haOptionKeyForStream(index: Int) = if (index == 0) IntegrationKeys.GENERIC else "generic:$index"

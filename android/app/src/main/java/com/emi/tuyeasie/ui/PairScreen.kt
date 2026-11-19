@@ -289,6 +289,39 @@ private fun LivePairingRow(state: OnboardingUiState, viewModel: OnboardingViewMo
     )
 }
 
+@Composable
+fun DeviceNameDialog(suggested: String, taken: Collection<String>, saving: Boolean, error: String?, onSave: (String) -> Unit, onSkip: () -> Unit) {
+    var name by rememberSaveable { mutableStateOf(suggested) }
+    val duplicate = name.trim() in taken
+    AlertDialog(
+        // The device is already paired, so there is nothing to cancel back to.
+        onDismissRequest = {},
+        title = { Text("Name this device") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Home Assistant will use this name too.", style = MaterialTheme.typography.bodyMedium)
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Name") },
+                    singleLine = true,
+                    enabled = !saving,
+                    isError = duplicate,
+                    supportingText = if (duplicate) { { Text("Another device already has this name.") } } else null,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                error?.let { InlineError(it) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(name.trim()) }, enabled = !saving && name.isNotBlank() && !duplicate) {
+                Text(if (saving) "Saving…" else "Save")
+            }
+        },
+        dismissButton = { TextButton(onClick = onSkip, enabled = !saving) { Text("Skip") } }
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun CameraAccountDialog(state: OnboardingUiState, viewModel: OnboardingViewModel) {

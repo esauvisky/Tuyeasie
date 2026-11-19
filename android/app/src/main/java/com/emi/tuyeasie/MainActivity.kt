@@ -45,12 +45,14 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.emi.tuyeasie.data.SavedTuyaAccount
 import com.emi.tuyeasie.data.TuyaManagedDevice
+import com.emi.tuyeasie.ui.DeviceNameDialog
 import com.emi.tuyeasie.ui.DeviceScreen
 import com.emi.tuyeasie.ui.DevicesScreen
 import com.emi.tuyeasie.ui.MyDevicesViewModel
 import com.emi.tuyeasie.ui.OnboardingViewModel
 import com.emi.tuyeasie.ui.PairScreen
 import com.emi.tuyeasie.ui.SettingsScreen
+import com.emi.tuyeasie.ui.nextDeviceName
 import com.emi.tuyeasie.ui.theme.LocalHaBar
 import com.emi.tuyeasie.ui.theme.OnboardingTheme
 
@@ -110,7 +112,7 @@ class MainActivity : ComponentActivity() {
                             actions = {
                                 if (tab == Tab.DEVICES) {
                                     val devicesState by myDevicesViewModel.uiState.collectAsStateWithLifecycle()
-                                    IconButton(onClick = myDevicesViewModel::refresh, enabled = devicesState.accounts.none { it.loading }) {
+                                    IconButton(onClick = myDevicesViewModel::refresh, enabled = !devicesState.refreshing) {
                                         Icon(Icons.Outlined.Refresh, contentDescription = "Refresh devices")
                                     }
                                 }
@@ -151,8 +153,18 @@ class MainActivity : ComponentActivity() {
                         state,
                         viewModel,
                         onOpenSettings = { viewModel.closeDeviceScreen(); tab = Tab.SETTINGS },
-                        onRename = { name -> viewModel.renameDevice(name, myDevicesViewModel::refresh) },
+                        onRename = { name, entityIds -> viewModel.renameDevice(name, entityIds, myDevicesViewModel::refresh) },
                         onUnpair = { unpairFromHomeAssistant = true; pendingUnpair = true }
+                    )
+                }
+                state.namingDevice?.let { device ->
+                    val devicesState by myDevicesViewModel.uiState.collectAsStateWithLifecycle()
+                    // The list may already hold this device under the name Tuya gave it.
+                    val taken = devicesState.accounts.flatMap { it.devices.orEmpty() }
+                        .filter { it.deviceId != device.deviceId }.map { it.name } + state.sessionDeviceNames
+                    DeviceNameDialog(
+                        nextDeviceName(device.name, taken), taken, state.savingDeviceName, state.deviceNameError,
+                        viewModel::nameNewDevice, viewModel::keepDeviceName
                     )
                 }
                 if (pendingUnpair) {

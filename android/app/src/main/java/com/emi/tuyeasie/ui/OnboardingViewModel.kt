@@ -81,6 +81,12 @@ data class OnboardingUiState(
     val integrationChooserVisible: Boolean = false,
     val notice: String? = null,
     val renaming: Boolean = false,
+    // A device that just paired and waits for its name before anything is set up for it.
+    val namingDevice: ActivatedDevice? = null,
+    val savingDeviceName: Boolean = false,
+    val deviceNameError: String? = null,
+    // Names given while this screen lived; the Devices list only learns them on its next refresh.
+    val sessionDeviceNames: List<String> = emptyList(),
     val removingIntegrations: Set<String> = emptySet(),
     val settings: AppSettings = AppSettings(),
     val testingConnection: Boolean = false,
@@ -218,7 +224,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 )
                 store.saveCapabilities(device.devId, deviceCapabilities(device))
                 deviceAccount = pairingAccount
-                importDevice(activated)
+                update { copy(namingDevice = activated, deviceNameError = null, activationProgress = "Paired. Waiting for a name…") }
             }
 
             override fun onFailure(stage: String, code: String, message: String) {
@@ -909,6 +915,38 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    /** Names the device that just paired, in Tuya, before anything is created for it in Home Assistant. */
+    fun nameNewDevice(name: String) {
+        val device = checkNotNull(current.namingDevice) { "No paired device is waiting for a name" }
+        check(name.isNotBlank()) { "Device name is empty" }
+        check(!current.savingDeviceName) { "The device name is already being saved" }
+        update { copy(savingDeviceName = true, deviceNameError = null) }
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    sdkLock.withLock {
+                        accountRepository.renameDevice(
+                            checkNotNull(deviceAccount) { "No Tuya account owns this device session" }, device.deviceId, name
+                        )
+                    }
+                }
+            } catch (e: TuyaSdkException) {
+                update { copy(savingDeviceName = false, deviceNameError = e.message) }
+                return@launch
+            }
+            update { copy(namingDevice = null, savingDeviceName = false, sessionDeviceNames = sessionDeviceNames + name) }
+            importDevice(device.copy(name = name))
+        }
+    }
+
+    /** Continues setup under the name Tuya gave the device. */
+    fun keepDeviceName() {
+        val device = checkNotNull(current.namingDevice) { "No paired device is waiting for a name" }
+        check(!current.savingDeviceName) { "The device name is being saved" }
+        update { copy(namingDevice = null, deviceNameError = null, sessionDeviceNames = sessionDeviceNames + device.name) }
+        importDevice(device)
+    }
+
     private fun importDevice(device: ActivatedDevice) {
         if (current.activationStatus == ActivationStatus.IMPORTING) return
         val generation = importGeneration.incrementAndGet()
@@ -1434,27 +1472,19 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         }
 
     /** Renames the device in Tuya, then every Home Assistant entry and device made for it. */
-    fun renameDevice(name: String, onRenamed: () -> Unit) {
+    fun renameDevice(name: String, renameEntityIds: Boolean, onRenamed: () -> Unit) {
         val device = checkNotNull(current.activatedDevice) { "No device is open" }
         check(name.isNotBlank()) { "Device name is empty" }
         check(!current.renaming) { "A rename is already running" }
-        val titles = current.integrationOptions.filter { it.entryId != null }.associate { option ->
-            // Mirrors the titles the extra camera streams were created with.
-            val title = when {
-                option.key == "generic:1" -> "$name Substream"
-                option.key.startsWith("generic:") -> "$name Stream ${option.key.substringAfter(':').toInt() + 1}"
-                else -> name
-            }
-            checkNotNull(option.entryId) to title
-        }
+        val titles = entryTitles(name, current.integrationOptions)
         update { copy(renaming = true) }
         viewModelScope.launch {
             try {
                 withContext(Dispatchers.IO) {
                     sdkLock.withLock {
-                        accountRepository.signIn(checkNotNull(deviceAccount) { "No Tuya account owns this device session" })
-                        val sdk = com.thingclips.smart.home.sdk.ThingHomeSdk.newDeviceInstance(device.deviceId)
-                        awaitDataPointResult("Rename device", sdk) { callback -> sdk.renameDevice(name, callback) }
+                        accountRepository.renameDevice(
+                            checkNotNull(deviceAccount) { "No Tuya account owns this device session" }, device.deviceId, name
+                        )
                     }
                 }
             } catch (e: TuyaSdkException) {
@@ -1467,7 +1497,10 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
             }
             onRenamed()
             val notice = if (titles.isEmpty()) "Renamed." else try {
-                withContext(Dispatchers.IO) { homeAssistantClient.renameEntries(titles) }
+                withContext(Dispatchers.IO) {
+                    homeAssistantClient.renameEntries(titles)
+                    if (renameEntityIds) homeAssistantClient.renameEntityIds(titles.keys, device.name, name)
+                }
                 "Renamed in Tuya and Home Assistant."
             } catch (e: HomeAssistantException) {
                 "Renamed in Tuya, but not in Home Assistant: ${homeAssistantMessage(e, current.settings)}"

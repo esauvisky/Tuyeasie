@@ -46,19 +46,17 @@ fun DevicesScreen(
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val clipboard = remember { context.getSystemService(ClipboardManager::class.java) }
-    val devices = withUniqueNames(state.accounts.flatMap { entry -> entry.devices.orEmpty().map { entry to it } })
+    val devices = state.accounts.flatMap { entry -> entry.devices.orEmpty().map { entry to it } }
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(padding).padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         HaCard(title = null) {
             state.actionError?.let { InlineError(it) }
-            state.accounts.forEach { entry ->
-                if (entry.loading && entry.devices.isNullOrEmpty()) StatusLine("Loading ${entry.saved.account.uid}…", busy = true)
-                entry.error?.let { InlineError("${entry.saved.kind.label}: $it") }
-            }
+            if (state.refreshing) StatusLine("Loading devices…", busy = true)
+            state.accounts.forEach { entry -> entry.error?.let { InlineError("${entry.saved.kind.label}: $it") } }
             if (state.accounts.isEmpty()) CardText("No Tuya accounts on this phone yet. Pair a device or add your account in Settings.")
-            if (state.accounts.isNotEmpty() && state.accounts.none { it.loading } && devices.isEmpty()) CardText("No devices yet.")
+            if (state.accounts.isNotEmpty() && !state.refreshing && devices.isEmpty()) CardText("No devices yet.")
             devices.forEach { (entry, device) ->
                 var menuOpen by remember { mutableStateOf(false) }
                 val enabled = configureEnabled && state.unpairingDeviceId == null
@@ -107,34 +105,6 @@ fun DevicesScreen(
         }
     }
     state.confirmation?.let { ConfirmationDialog(it, viewModel::confirm, viewModel::toggleUnpairHomeAssistant, viewModel::dismissConfirmation) }
-}
-
-// Numbering follows device ID so a device keeps its suffix across refreshes; the name also reaches Home Assistant.
-private fun withUniqueNames(
-    devices: List<Pair<AccountDevicesState, TuyaManagedDevice>>
-): List<Pair<AccountDevicesState, TuyaManagedDevice>> {
-    val taken = devices.map { it.second.name }.toMutableSet()
-    val renamed = devices.map { it.second }
-        .groupBy { it.name }
-        .filterValues { it.size > 1 }
-        .flatMap { (name, group) ->
-            var number = 0
-            group.sortedBy { it.deviceId }.map { device ->
-                var candidate: String
-                do {
-                    number++
-                    candidate = "$name $number"
-                } while (candidate in taken)
-                taken += candidate
-                device.deviceId to candidate
-            }
-        }
-        .toMap()
-    return devices.map { (entry, device) ->
-        val name = renamed[device.deviceId]
-        if (name == null) entry to device
-        else entry to device.copy(name = name, activated = device.activated.copy(name = name))
-    }
 }
 
 @Composable

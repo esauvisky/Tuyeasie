@@ -370,6 +370,37 @@ class HomeAssistantClient(
         }
     }
 
+    /** Swaps the old name's slug for the new one at the start of every entity ID these entries own. */
+    fun renameEntityIds(entryIds: Set<String>, oldName: String, newName: String) {
+        val oldSlug = HomeAssistantProtocol.entitySlug(oldName)
+        val newSlug = HomeAssistantProtocol.entitySlug(newName)
+        if (newSlug.isEmpty()) {
+            throw HomeAssistantException(HomeAssistantError.INVALID_FORMAT, "\"$newName\" has no letters or digits an entity ID can use.")
+        }
+        withVerifiedSession { session ->
+            val registry = session.callCommand("config/entity_registry/list").getJSONArray("result")
+                ?: throw invalidResponse("Home Assistant returned no entity registry.")
+            val entities = (0 until registry.size).map { registry.getJSONObject(it) }
+            val taken = entities
+                .map { checkNotNull(it.getString("entity_id")) { "An entity registry entry has no entity_id" } }
+                .toMutableSet()
+            for (entity in entities) {
+                val entryId = entity.getString("config_entry_id") ?: continue
+                if (entryId !in entryIds) continue
+                val entityId = entity.getString("entity_id")
+                val domain = entityId.substringBefore('.')
+                val objectId = entityId.substringAfter('.')
+                // IDs that were not built from the old name are left alone.
+                if (objectId != oldSlug && !objectId.startsWith("${oldSlug}_")) continue
+                val wanted = HomeAssistantProtocol.freeEntityId("$domain.$newSlug${objectId.removePrefix(oldSlug)}", taken - entityId)
+                if (wanted == entityId) continue
+                session.callCommand("config/entity_registry/update", mapOf("entity_id" to entityId, "new_entity_id" to wanted))
+                taken -= entityId
+                taken += wanted
+            }
+        }
+    }
+
     private fun <T> withVerifiedSession(block: (WebSocketSession) -> T): T {
         val reconnectDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RECONNECT_WINDOW_SECONDS)
         while (true) {
@@ -442,8 +473,27 @@ class HomeAssistantClient(
             session.callCommand("config_entries/update", mapOf("entry_id" to entryId, "title" to name))
             awaitEntryLoaded(session, entryId)
             enableCameraEntities(session, setOf(entryId))
+            nameCameraEntity(session, entryId, name)
         }
         return entryId
+    }
+
+    // Home Assistant builds a generic camera's entity ID from its stream's host; it is replaced with the camera's name.
+    private fun nameCameraEntity(session: WebSocketSession, entryId: String, name: String) {
+        val slug = HomeAssistantProtocol.entitySlug(name)
+        // A name with no Latin letters or digits has no slug, so Home Assistant's own ID stays.
+        if (slug.isEmpty()) return
+        val registry = session.callCommand("config/entity_registry/list").getJSONArray("result")
+            ?: throw invalidResponse("Home Assistant returned no entity registry.")
+        val entities = (0 until registry.size).map { registry.getJSONObject(it) }
+        val ids = entities.map { checkNotNull(it.getString("entity_id")) { "An entity registry entry has no entity_id" } }
+        val current = entities
+            .filter { it.getString("config_entry_id") == entryId && it.getString("entity_id").startsWith("camera.") }
+            .singleOrNull()?.getString("entity_id")
+            ?: throw invalidResponse("The generic camera entry does not have exactly one camera entity.")
+        val wanted = HomeAssistantProtocol.freeEntityId("camera.$slug", ids.toSet() - current)
+        if (wanted == current) return
+        session.callCommand("config/entity_registry/update", mapOf("entity_id" to current, "new_entity_id" to wanted))
     }
 
     private fun findCameraEntryId(name: String): String? {
@@ -926,6 +976,22 @@ class HomeAssistantClient(
 }
 
 internal object HomeAssistantProtocol {
+    /** Home Assistant's slug: lower case, accents dropped, every other run of characters becomes one underscore. */
+    fun entitySlug(name: String): String =
+        java.text.Normalizer.normalize(name, java.text.Normalizer.Form.NFD)
+            .replace(Regex("\\p{M}+"), "")
+            .lowercase()
+            .replace(Regex("[^a-z0-9]+"), "_")
+            .trim('_')
+
+    /** Home Assistant numbers an entity ID that is already in use: `_2`, `_3`, and so on. */
+    fun freeEntityId(wanted: String, taken: Set<String>): String {
+        if (wanted !in taken) return wanted
+        var number = 2
+        while ("${wanted}_$number" in taken) number++
+        return "${wanted}_$number"
+    }
+
     fun webSocketUrl(hassUrl: String): String {
         val base = hassUrl.trim().trimEnd('/')
         val converted = when {

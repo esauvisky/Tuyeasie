@@ -120,6 +120,17 @@ class TuyaAccountRepository(context: Context, private val store: SecureSettingsS
         }
     }
 
+    suspend fun renameDevice(account: TuyaAccount, deviceId: String, name: String) {
+        signIn(account)
+        suspendCancellableCoroutine { cont ->
+            ThingHomeSdk.newDeviceInstance(deviceId).renameDevice(name, object : IResultCallback {
+                override fun onSuccess() = cont.resume(Unit)
+                override fun onError(code: String, error: String) =
+                    cont.resumeWithException(TuyaSdkException("Rename device", code, error))
+            })
+        }
+    }
+
     suspend fun signIn(account: TuyaAccount) {
         val countryCode = CountryCodeProvider.current(appContext)
         suspendCancellableCoroutine { cont ->
