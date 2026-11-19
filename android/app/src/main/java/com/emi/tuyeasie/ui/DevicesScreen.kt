@@ -99,7 +99,7 @@ fun DevicesScreen(
                         )
                         DropdownMenuItem(
                             text = { Text("Unpair", color = MaterialTheme.colorScheme.error) },
-                            onClick = { menuOpen = false; viewModel.requestUnpair(entry.saved, device) }
+                            onClick = { menuOpen = false; viewModel.requestUnpair(entry.saved, device.deviceId, device.name) }
                         )
                     }
                 }
@@ -219,7 +219,7 @@ private fun ConfirmationDialog(confirmation: MyDevicesConfirmation, onConfirm: (
     val (title, body, action) = when (confirmation) {
         is MyDevicesConfirmation.Unpair -> Triple(
             "Unpair device?",
-            "\"${confirmation.device.name}\" (${confirmation.device.deviceId}) will be removed from " +
+            "\"${confirmation.name}\" (${confirmation.deviceId}) will be removed from " +
                 "${confirmation.saved.account.uid}. A factory reset may be required to pair it again.",
             "Unpair"
         )

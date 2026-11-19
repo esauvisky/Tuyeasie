@@ -78,8 +78,7 @@ class MainActivity : ComponentActivity() {
                 val snackbar = remember { SnackbarHostState() }
                 val uriHandler = LocalUriHandler.current
                 val bar = LocalHaBar.current
-                var deviceSource by remember { mutableStateOf<Pair<SavedTuyaAccount, TuyaManagedDevice>?>(null) }
-                var pendingUnpair by remember { mutableStateOf<Pair<SavedTuyaAccount, TuyaManagedDevice>?>(null) }
+                var pendingUnpair by remember { mutableStateOf(false) }
                 var unpairFromHomeAssistant by remember { mutableStateOf(true) }
                 LaunchedEffect(state.permissionRequestVersion) {
                     if (state.permissionRequestVersion > 0) {
@@ -140,7 +139,6 @@ class MainActivity : ComponentActivity() {
                             viewModel = myDevicesViewModel,
                             configureEnabled = !state.busy,
                             onConfigureDevice = { account, device ->
-                                deviceSource = account to device
                                 viewModel.openDeviceSetup(device.activated, device.capabilities, account.account)
                             },
                             padding = padding
@@ -149,18 +147,18 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 if (state.deviceScreenOpen) {
-                    val source = deviceSource?.takeIf { it.second.deviceId == state.activatedDevice?.deviceId }
                     DeviceScreen(
                         state,
                         viewModel,
                         onOpenSettings = { viewModel.closeDeviceScreen(); tab = Tab.SETTINGS },
                         onRename = { name -> viewModel.renameDevice(name, myDevicesViewModel::refresh) },
-                        onUnpair = source?.let { (account, device) -> { unpairFromHomeAssistant = true; pendingUnpair = account to device.copy(name = checkNotNull(state.activatedDevice).name) } }
+                        onUnpair = { unpairFromHomeAssistant = true; pendingUnpair = true }
                     )
                 }
-                pendingUnpair?.let { (account, device) ->
+                if (pendingUnpair) {
+                    val device = checkNotNull(state.activatedDevice) { "Unpair without an open device" }
                     androidx.compose.material3.AlertDialog(
-                        onDismissRequest = { pendingUnpair = null },
+                        onDismissRequest = { pendingUnpair = false },
                         title = { Text("Unpair device?") },
                         text = {
                             Column {
@@ -170,15 +168,16 @@ class MainActivity : ComponentActivity() {
                         },
                         confirmButton = {
                             androidx.compose.material3.TextButton(onClick = {
-                                pendingUnpair = null
+                                pendingUnpair = false
+                                val owner = viewModel.deviceOwner()
                                 viewModel.closeDeviceScreen()
                                 tab = Tab.DEVICES
-                                myDevicesViewModel.requestUnpair(account, device)
+                                myDevicesViewModel.requestUnpair(owner, device.deviceId, device.name)
                                 if (!unpairFromHomeAssistant) myDevicesViewModel.toggleUnpairHomeAssistant()
                                 myDevicesViewModel.confirm()
                             }) { Text("Unpair") }
                         },
-                        dismissButton = { androidx.compose.material3.TextButton(onClick = { pendingUnpair = null }) { Text("Cancel") } }
+                        dismissButton = { androidx.compose.material3.TextButton(onClick = { pendingUnpair = false }) { Text("Cancel") } }
                     )
                 }
             }

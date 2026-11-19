@@ -32,7 +32,7 @@ data class AccountDevicesState(
 )
 
 sealed interface MyDevicesConfirmation {
-    data class Unpair(val saved: SavedTuyaAccount, val device: TuyaManagedDevice, val removeFromHomeAssistant: Boolean = true) : MyDevicesConfirmation
+    data class Unpair(val saved: SavedTuyaAccount, val deviceId: String, val name: String, val removeFromHomeAssistant: Boolean = true) : MyDevicesConfirmation
     data class Forget(val saved: SavedTuyaAccount) : MyDevicesConfirmation
 }
 
@@ -145,8 +145,8 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    fun requestUnpair(saved: SavedTuyaAccount, device: TuyaManagedDevice) =
-        _uiState.update { it.copy(confirmation = MyDevicesConfirmation.Unpair(saved, device)) }
+    fun requestUnpair(saved: SavedTuyaAccount, deviceId: String, name: String) =
+        _uiState.update { it.copy(confirmation = MyDevicesConfirmation.Unpair(saved, deviceId, name)) }
 
     fun toggleUnpairHomeAssistant() = _uiState.update {
         val unpair = it.confirmation as MyDevicesConfirmation.Unpair
@@ -171,16 +171,16 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun unpair(confirmation: MyDevicesConfirmation.Unpair) {
-        val device = confirmation.device
-        _uiState.update { it.copy(unpairingDeviceId = device.deviceId, actionError = null) }
+        val deviceId = confirmation.deviceId
+        _uiState.update { it.copy(unpairingDeviceId = deviceId, actionError = null) }
         viewModelScope.launch {
             if (confirmation.removeFromHomeAssistant && store.loadSettings().hassUrl.isNotBlank()) {
                 try {
                     withContext(Dispatchers.IO) {
                         homeAssistantClient.removeDevice(
-                            device.deviceId,
-                            store.integrationEntryIds(device.deviceId),
-                            listOf("${device.name} Main", "${device.name} Substream")
+                            deviceId,
+                            store.integrationEntryIds(deviceId),
+                            listOf("${confirmation.name} Main", "${confirmation.name} Substream")
                         )
                     }
                 } catch (e: HomeAssistantException) {
@@ -191,12 +191,12 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
                 }
             }
             try {
-                sdkLock.withLock { repository.removeDevice(confirmation.saved.account, device.deviceId) }
+                sdkLock.withLock { repository.removeDevice(confirmation.saved.account, deviceId) }
             } catch (e: TuyaSdkException) {
                 _uiState.update { it.copy(unpairingDeviceId = null, actionError = e.message) }
                 return@launch
             }
-            withContext(Dispatchers.IO) { store.forgetDevice(device.deviceId) }
+            withContext(Dispatchers.IO) { store.forgetDevice(deviceId) }
             _uiState.update { it.copy(unpairingDeviceId = null) }
             refresh()
         }

@@ -1308,6 +1308,12 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    /** The saved Tuya account the open device belongs to. */
+    fun deviceOwner(): com.emi.tuyeasie.data.SavedTuyaAccount {
+        val account = checkNotNull(deviceAccount) { "No Tuya account owns this device session" }
+        return accountRepository.savedAccounts().single { it.account == account }
+    }
+
     private suspend fun persistIntegrationSuccess(key: String, association: HaEntryAssociation) {
         val deviceId = checkNotNull(current.activatedDevice) { "No active device after integration add" }.deviceId
         val old = current.integrationOptions.single { it.key == key }

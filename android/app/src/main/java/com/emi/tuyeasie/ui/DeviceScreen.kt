@@ -54,7 +54,7 @@ import com.emi.tuyeasie.ui.theme.LocalHaBar
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DeviceScreen(state: OnboardingUiState, viewModel: OnboardingViewModel, onOpenSettings: () -> Unit, onRename: (String) -> Unit, onUnpair: (() -> Unit)?) {
+fun DeviceScreen(state: OnboardingUiState, viewModel: OnboardingViewModel, onOpenSettings: () -> Unit, onRename: (String) -> Unit, onUnpair: () -> Unit) {
     val device = checkNotNull(state.activatedDevice) { "Device screen without a device" }
     val busy = state.renaming || state.activationStatus == ActivationStatus.ACTIVATING || state.onvifStatus == OnvifStatus.CONFIGURING ||
         state.integrationOptions.any { it.status == IntegrationStatus.ADDING }
@@ -83,7 +83,7 @@ fun DeviceScreen(state: OnboardingUiState, viewModel: OnboardingViewModel, onOpe
                     IconButton(onClick = viewModel::refreshDevice, enabled = !busy && state.scanStatus == ScanStatus.IDLE) {
                         Icon(Icons.Outlined.Refresh, contentDescription = "Refresh everything, including the address")
                     }
-                    if (onUnpair != null) Box {
+                    Box {
                     IconButton(onClick = { menuOpen = true }, enabled = !busy) {
                         Icon(Icons.Outlined.MoreVert, contentDescription = "More for ${device.name}")
                     }
