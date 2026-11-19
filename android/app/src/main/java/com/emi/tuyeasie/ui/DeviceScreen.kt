@@ -81,7 +81,7 @@ fun DeviceScreen(state: OnboardingUiState, viewModel: OnboardingViewModel, onOpe
                 title = { Text(device.name) },
                 actions = {
                     IconButton(onClick = viewModel::refreshDevice, enabled = !busy && state.scanStatus == ScanStatus.IDLE) {
-                        Icon(Icons.Outlined.Refresh, contentDescription = "Refresh everything, including the address")
+                        Icon(Icons.Outlined.Refresh, contentDescription = "Find the device again and check it is online")
                     }
                     Box {
                     IconButton(onClick = { menuOpen = true }, enabled = !busy) {
@@ -212,14 +212,11 @@ private fun IntegrationChooserDialog(state: OnboardingUiState, viewModel: Onboar
 @Composable
 private fun AddressCard(state: OnboardingUiState) {
     val report = state.networkReport ?: return
-    val now = System.currentTimeMillis()
-    val age = if (now - report.scannedAt < DateUtils.MINUTE_IN_MILLIS) "just now"
-    else DateUtils.getRelativeTimeSpanString(report.scannedAt, now, DateUtils.MINUTE_IN_MILLIS, DateUtils.FORMAT_ABBREV_RELATIVE)
     HaCard(title = null) {
         EntityRow(
             icon = { EntityIcon(Icons.Outlined.Router, RowTone.NEUTRAL) },
             title = report.ip ?: "No LAN address found",
-            state = listOfNotNull(state.online?.let { if (it) "Online" else "Offline" }, "Scanned $age").joinToString(" · "),
+            state = state.online?.let { if (it) "Online" else "Offline" },
             tone = when (state.online) {
                 true -> RowTone.OK
                 false -> RowTone.FAILED
@@ -240,6 +237,11 @@ private fun NetworkCard(state: OnboardingUiState, viewModel: OnboardingViewModel
             if (!scanning && state.scanError == null) CardText("Not scanned yet.")
             return@HaCard
         }
+        val now = System.currentTimeMillis()
+        CardText(
+            if (now - report.scannedAt < DateUtils.MINUTE_IN_MILLIS) "Ports last scanned less than a minute ago."
+            else "Ports last scanned ${DateUtils.getRelativeTimeSpanString(report.scannedAt, now, DateUtils.MINUTE_IN_MILLIS)}."
+        )
         if (report.openPorts.isEmpty()) CardText("No open TCP ports.")
         report.openPorts.forEach { port ->
             EntityRow(
