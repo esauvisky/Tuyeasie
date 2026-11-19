@@ -100,7 +100,6 @@ fun DeviceScreen(state: OnboardingUiState, viewModel: OnboardingViewModel, onOpe
             HomeAssistantIntegrationsCard(state, viewModel, onOpenSettings)
             NetworkCard(state, viewModel)
             DataPointsLink(state) { dataPointsOpen = true }
-            DetailsCard(state, viewModel)
             AdvancedCard(state, viewModel)
         }
     }
@@ -223,23 +222,6 @@ private fun NetworkCard(state: OnboardingUiState, viewModel: OnboardingViewModel
 }
 
 @Composable
-private fun DetailsCard(state: OnboardingUiState, viewModel: OnboardingViewModel) {
-    val device = checkNotNull(state.activatedDevice) { "Details without a device" }
-    val context = LocalContext.current
-    val clipboard = remember(context) { context.getSystemService(ClipboardManager::class.java) }
-    fun copy(label: String, value: String) = clipboard.setPrimaryClip(ClipData.newPlainText(label, value))
-    HaCard(title = "Details") {
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            CopyField("Device ID", device.deviceId) { copy("Tuya device ID", device.deviceId) }
-            SecretField("Local key", device.localKey, state.showLocalKey, viewModel::toggleLocalKeyVisibility) { clipboard.setPrimaryClip(sensitiveClip("Tuya local key", device.localKey)) }
-            CopyField("Product ID", device.productId) { copy("Tuya product ID", device.productId) }
-            device.protocolVersion?.let { CopyField("Protocol version", it) { copy("Tuya protocol version", it) } }
-            device.category?.let { CopyField("Category", it) { copy("Tuya category", it) } }
-        }
-    }
-}
-
-@Composable
 private fun DataPointsLink(state: OnboardingUiState, onOpen: () -> Unit) {
     val points = checkNotNull(state.capabilities) { "Data points without device schema" }.dataPoints
     if (points.isEmpty()) return
@@ -268,9 +250,15 @@ private fun AdvancedCard(state: OnboardingUiState, viewModel: OnboardingViewMode
     val info = state.networkReport?.onvif
     val main = record?.mainUrl ?: info?.streams?.firstOrNull()?.url ?: state.networkReport?.portScanStreams?.firstOrNull()?.url
     val sub = record?.subUrl ?: info?.streams?.getOrNull(1)?.url ?: state.networkReport?.portScanStreams?.getOrNull(1)?.url
-    if (info == null && record == null && state.capabilities?.tuyaOnvif != true && main == null) return
+    fun copy(label: String, value: String) = clipboard.setPrimaryClip(ClipData.newPlainText(label, value))
     HaCard(title = null) {
         Disclosure("Advanced") {
+            CopyField("Device ID", device.deviceId) { copy("Tuya device ID", device.deviceId) }
+            SecretField("Local key", device.localKey, state.showLocalKey, viewModel::toggleLocalKeyVisibility) { clipboard.setPrimaryClip(sensitiveClip("Tuya local key", device.localKey)) }
+            CopyField("Product ID", device.productId) { copy("Tuya product ID", device.productId) }
+            device.protocolVersion?.let { CopyField("Protocol version", it) { copy("Tuya protocol version", it) } }
+            device.category?.let { CopyField("Category", it) { copy("Tuya category", it) } }
+            if (info == null && record == null && state.capabilities?.tuyaOnvif != true && main == null) return@Disclosure
             info?.let { CopyField("ONVIF service URL", it.serviceUrl) { clipboard.setPrimaryClip(ClipData.newPlainText("ONVIF service URL", it.serviceUrl)) } }
             main?.let { CopyField("Main RTSP URL", it) { clipboard.setPrimaryClip(ClipData.newPlainText("Main RTSP URL", it)) } }
             sub?.let { CopyField("Substream RTSP URL", it) { clipboard.setPrimaryClip(ClipData.newPlainText("Substream RTSP URL", it)) } }
