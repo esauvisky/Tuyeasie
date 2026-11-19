@@ -54,7 +54,7 @@ import com.emi.tuyeasie.ui.theme.LocalHaBar
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DeviceScreen(state: OnboardingUiState, viewModel: OnboardingViewModel, iconUrl: String?, onOpenSettings: () -> Unit, onUnpair: (() -> Unit)?) {
+fun DeviceScreen(state: OnboardingUiState, viewModel: OnboardingViewModel, onOpenSettings: () -> Unit, onUnpair: (() -> Unit)?) {
     val device = checkNotNull(state.activatedDevice) { "Device screen without a device" }
     val busy = state.activationStatus == ActivationStatus.ACTIVATING || state.onvifStatus == OnvifStatus.CONFIGURING ||
         state.integrationOptions.any { it.status == IntegrationStatus.ADDING }
@@ -95,13 +95,6 @@ fun DeviceScreen(state: OnboardingUiState, viewModel: OnboardingViewModel, iconU
         }
     ) { padding ->
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(padding).padding(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            HaCard(title = null) {
-                EntityRow(
-                    icon = { EntityIcon(categoryIcon(device.category), RowTone.NEUTRAL, imageUrl = iconUrl) },
-                    title = device.name,
-                    state = listOfNotNull(state.networkReport?.ip, device.category?.let { "category $it" }, state.capabilities?.let { "${it.dataPoints.size} data points" }).joinToString(" · ")
-                )
-            }
             HomeAssistantIntegrationsCard(state, viewModel, onOpenSettings)
             NetworkCard(state, viewModel)
             DataPointsLink(state) { dataPointsOpen = true }

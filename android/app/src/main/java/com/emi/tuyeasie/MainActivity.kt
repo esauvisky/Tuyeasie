@@ -152,7 +152,6 @@ class MainActivity : ComponentActivity() {
                     DeviceScreen(
                         state,
                         viewModel,
-                        iconUrl = source?.second?.iconUrl,
                         onOpenSettings = { viewModel.closeDeviceScreen(); tab = Tab.SETTINGS },
                         onUnpair = source?.let { (account, device) -> { pendingUnpair = account to device } }
                     )
