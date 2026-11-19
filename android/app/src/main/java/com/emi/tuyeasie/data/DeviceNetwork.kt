@@ -1,8 +1,5 @@
 package com.emi.tuyeasie.data
 
-import com.alibaba.fastjson.JSON
-import com.alibaba.fastjson.JSONException
-
 /** A Tuya DP schema item. The raw property JSON is retained so controls can be derived without lossy parsing. */
 data class TuyaDataPointSchema(
     val id: String,
@@ -13,22 +10,21 @@ data class TuyaDataPointSchema(
     val propertyJson: String,
     val schemaType: String
 ) {
+    // "wr" is write-only: the device accepts it but never reports it.
     val writable: Boolean
-        get() = mode.equals("rw", ignoreCase = true)
+        get() = mode == "rw" || mode == "wr"
 
+    // `type` is the transport kind ("obj", "raw", "file"); the value kind of an "obj" DP is in `schemaType`.
     val editorType: String?
         get() {
             if (!writable) return null
-            val property = try {
-                JSON.parseObject(propertyJson)
-            } catch (e: JSONException) {
-                return null
-            }
-            return when (type.lowercase()) {
-                "bool", "boolean" -> "boolean"
-                "enum" -> if (property.getJSONArray("range") != null) "enum" else null
-                "integer", "int" -> if (property.containsKey("min") && property.containsKey("max")) "integer" else null
-                "value", "number", "float", "decimal" -> if (property.containsKey("min") && property.containsKey("max")) "number" else null
+            if (type == "raw") return "raw"
+            if (type != "obj") return null
+            return when (schemaType) {
+                "bool" -> "boolean"
+                "enum" -> "enum"
+                "value" -> "integer"
+                "bitmap" -> "bitmap"
                 "string" -> "string"
                 else -> null
             }

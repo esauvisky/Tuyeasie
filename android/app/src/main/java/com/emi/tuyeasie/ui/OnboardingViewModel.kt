@@ -1420,13 +1420,17 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 check(min == null || number >= min) { "Value is below minimum $min" }
                 check(max == null || number <= max) { "Value is above maximum $max" }
             }
-            "number" -> raw.toDouble().also { number ->
-                val min = property.getDouble("min")
-                val max = property.getDouble("max")
-                check(min == null || number >= min) { "Value is below minimum $min" }
-                check(max == null || number <= max) { "Value is above maximum $max" }
+            "bitmap" -> raw.toInt().also { number ->
+                val bits = checkNotNull(property.getInteger("maxlen")) { "Bitmap DP ${schema.id} has no maxlen" }
+                check(number >= 0 && number < (1L shl bits)) { "Value does not fit in $bits bits" }
             }
-            "string" -> raw
+            "string" -> raw.also { text ->
+                val max = property.getInteger("maxlen")
+                check(max == null || text.length <= max) { "Value is longer than $max characters" }
+            }
+            "raw" -> raw.also { hex ->
+                check(hex.length % 2 == 0 && hex.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) { "Value is not whole hex bytes" }
+            }
             else -> error("Data point ${schema.id} has no supported editor")
         }
     }

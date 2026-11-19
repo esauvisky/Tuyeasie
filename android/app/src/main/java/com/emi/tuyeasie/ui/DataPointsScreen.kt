@@ -125,9 +125,10 @@ private fun DataPointRow(schema: TuyaDataPointSchema, point: ManualDataPoint, vi
     val editor = schema.editorType
     var enumOpen by remember { mutableStateOf(false) }
     val onClick: (() -> Unit)? = when {
-        busy || point.value == null && editor != "string" -> null
-        editor == "boolean" -> { { viewModel.setDataPoint(schema.id, (point.value != true).toString()) } }
-        editor == "enum" -> { { enumOpen = true } }
+        busy -> null
+        editor == "boolean" && point.value is Boolean -> { { viewModel.setDataPoint(schema.id, (!point.value).toString()) } }
+        // A boolean the device has not reported (write-only ones never are) has no state to flip, so it is picked.
+        editor == "enum" || editor == "boolean" -> { { enumOpen = true } }
         editor != null -> { { onEdit(schema) } }
         else -> null
     }
@@ -161,13 +162,13 @@ private fun DataPointRow(schema: TuyaDataPointSchema, point: ManualDataPoint, vi
                 busy -> CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
                 editor == "boolean" && point.value is Boolean ->
                     Switch(checked = point.value, onCheckedChange = { viewModel.setDataPoint(schema.id, it.toString()) })
-                editor == "enum" -> Box {
+                editor == "enum" || editor == "boolean" -> Box {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         ValueText(formatValue(schema, point.value), MaterialTheme.colorScheme.primary)
                         Icon(Icons.Outlined.ArrowDropDown, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                     }
                     DropdownMenu(expanded = enumOpen, onDismissRequest = { enumOpen = false }) {
-                        enumRange(schema).forEach { option ->
+                        (if (editor == "boolean") listOf("true", "false") else enumRange(schema)).forEach { option ->
                             DropdownMenuItem(text = { Text(option) }, onClick = {
                                 enumOpen = false
                                 viewModel.setDataPoint(schema.id, option)
@@ -194,9 +195,14 @@ private fun ValueText(text: String, color: androidx.compose.ui.graphics.Color) {
 private fun EditDataPointDialog(schema: TuyaDataPointSchema, point: ManualDataPoint, viewModel: OnboardingViewModel, onDismiss: () -> Unit) {
     val editor = checkNotNull(schema.editorType) { "Data point ${schema.id} has no editor" }
     val property = JSON.parseObject(schema.propertyJson)
-    val numeric = editor == "integer" || editor == "number"
+    val numeric = editor == "integer" || editor == "bitmap"
     var text by remember(schema.id) { mutableStateOf(point.value?.toString().orEmpty()) }
-    val hint = if (numeric) listOfNotNull("${property.get("min")} to ${property.get("max")}", property.getString("unit")?.takeIf { it.isNotBlank() }).joinToString(" ") else null
+    val hint = when (editor) {
+        "integer" -> listOfNotNull("${property.get("min")} to ${property.get("max")}", property.getString("unit")?.takeIf { it.isNotBlank() }).joinToString(" ")
+        "bitmap" -> "Bit flags as a number, ${property.get("maxlen")} bits"
+        "raw" -> "Hex bytes"
+        else -> null
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(displayName(schema)) },
