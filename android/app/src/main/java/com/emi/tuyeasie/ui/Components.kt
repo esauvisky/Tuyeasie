@@ -36,7 +36,6 @@ import androidx.compose.material.icons.outlined.Wifi
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -94,7 +93,7 @@ fun HaCard(
                 actions()
             }
         }
-        Column(modifier = Modifier.padding(bottom = 8.dp), content = content)
+        Column(modifier = Modifier.padding(top = if (title == null) 8.dp else 0.dp, bottom = 8.dp), content = content)
     }
 }
 
@@ -236,7 +235,6 @@ fun StatusLine(text: String, busy: Boolean) {
 @Composable
 fun Disclosure(title: String, content: @Composable ColumnScope.() -> Unit) {
     var expanded by rememberSaveable { mutableStateOf(false) }
-    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
     Row(
         modifier = Modifier
             .fillMaxWidth()

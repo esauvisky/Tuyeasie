@@ -214,7 +214,8 @@ private fun AddressCard(state: OnboardingUiState) {
             icon = { EntityIcon(Icons.Outlined.Router, RowTone.NEUTRAL) },
             title = report.ip ?: "No LAN address found",
             state = listOfNotNull(
-                state.capabilities?.mac,
+                // Tuya reports an empty MAC for some devices.
+                state.capabilities?.mac?.takeIf { it.isNotBlank() },
                 report.addressSource?.label,
                 "Scanned ${DateUtils.getRelativeTimeSpanString(report.scannedAt)}"
             ).joinToString(" · ")
