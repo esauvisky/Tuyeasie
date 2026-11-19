@@ -935,6 +935,16 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                     onvifError = sanitizeError(checkNotNull(e.message), current.settings, device, *accountSecrets())
                 }
             }
+            var switchError: String? = null
+            val onvifSwitch = capabilities.onvifSwitch
+            if (onvifSwitch != null && !capabilities.tuyaOnvif) {
+                update { copy(activationProgress = "Turning ONVIF on before scanning…") }
+                try {
+                    withContext(Dispatchers.IO) { publishDataPoint(device, onvifSwitch.id, true) }
+                } catch (e: TuyaSdkException) {
+                    switchError = e.message
+                }
+            }
             if (generation != importGeneration.get()) return@launch
             update { copy(activationProgress = "Resolving address and scanning ports…") }
             val address = try {
@@ -955,6 +965,9 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
             if (address == null) {
                 val options = withContext(Dispatchers.IO) { store.loadIntegrationOptions(device.deviceId) }
                 update { copy(integrationOptions = options, scanError = "No local address was found, so nothing can be added to Home Assistant yet.") }
+            } else if (switchError != null) {
+                val options = withContext(Dispatchers.IO) { store.loadIntegrationOptions(device.deviceId) }
+                update { copy(integrationOptions = options, scanError = "ONVIF could not be turned on, so ports were not scanned: $switchError") }
             } else {
                 launchNetworkScan(device.deviceId, capabilities, address, showChooserWhenComplete = true)
             }

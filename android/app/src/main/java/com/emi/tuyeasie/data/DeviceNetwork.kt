@@ -38,6 +38,9 @@ data class DeviceCapabilities(
 ) {
     val tuyaOnvif: Boolean
         get() = TUYA_ONVIF_CODES.all { code -> dataPoints.any { it.code == code } }
+    // Some cameras have only the switch, without the password and IP data points `tuyaOnvif` needs.
+    val onvifSwitch: TuyaDataPointSchema?
+        get() = dataPoints.find { it.code == "onvif_switch" }
     val supportsTuyaLocal: Boolean
         get() = tuyaLan && dataPoints.isNotEmpty()
 
