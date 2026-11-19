@@ -154,7 +154,8 @@ class MainActivity : ComponentActivity() {
                         state,
                         viewModel,
                         onOpenSettings = { viewModel.closeDeviceScreen(); tab = Tab.SETTINGS },
-                        onUnpair = source?.let { (account, device) -> { unpairFromHomeAssistant = true; pendingUnpair = account to device } }
+                        onRename = { name -> viewModel.renameDevice(name, myDevicesViewModel::refresh) },
+                        onUnpair = source?.let { (account, device) -> { unpairFromHomeAssistant = true; pendingUnpair = account to device.copy(name = checkNotNull(state.activatedDevice).name) } }
                     )
                 }
                 pendingUnpair?.let { (account, device) ->

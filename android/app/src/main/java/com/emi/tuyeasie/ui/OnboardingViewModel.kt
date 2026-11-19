@@ -80,6 +80,7 @@ data class OnboardingUiState(
     val deviceScreenOpen: Boolean = false,
     val integrationChooserVisible: Boolean = false,
     val notice: String? = null,
+    val renaming: Boolean = false,
     val settings: AppSettings = AppSettings(),
     val testingConnection: Boolean = false,
     val connectionVerified: Boolean = false,
@@ -840,6 +841,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     private fun deviceScreenBusy() = current.deviceScreenOpen && (
+        current.renaming ||
         current.activationStatus == ActivationStatus.IMPORTING ||
             current.onvifStatus == OnvifStatus.CONFIGURING ||
             current.integrationOptions.any { it.status == IntegrationStatus.ADDING }
@@ -1398,6 +1400,49 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
             // DPs the device has never reported are absent from the bean.
             ids.associateWith { id -> values[id] }
         }
+
+    /** Renames the device in Tuya, then every Home Assistant entry and device made for it. */
+    fun renameDevice(name: String, onRenamed: () -> Unit) {
+        val device = checkNotNull(current.activatedDevice) { "No device is open" }
+        check(name.isNotBlank()) { "Device name is empty" }
+        check(!current.renaming) { "A rename is already running" }
+        val titles = current.integrationOptions.filter { it.entryId != null }.associate { option ->
+            // Mirrors the titles the extra camera streams were created with.
+            val title = when {
+                option.key == "generic:1" -> "$name Substream"
+                option.key.startsWith("generic:") -> "$name Stream ${option.key.substringAfter(':').toInt() + 1}"
+                else -> name
+            }
+            checkNotNull(option.entryId) to title
+        }
+        update { copy(renaming = true) }
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    sdkLock.withLock {
+                        accountRepository.signIn(checkNotNull(deviceAccount) { "No Tuya account owns this device session" })
+                        val sdk = com.thingclips.smart.home.sdk.ThingHomeSdk.newDeviceInstance(device.deviceId)
+                        awaitDataPointResult("Rename device", sdk) { callback -> sdk.renameDevice(name, callback) }
+                    }
+                }
+            } catch (e: TuyaSdkException) {
+                update { copy(renaming = false, notice = "Rename failed: ${e.message}") }
+                return@launch
+            }
+            update {
+                val open = activatedDevice
+                if (open == null || open.deviceId != device.deviceId) this else copy(activatedDevice = open.copy(name = name))
+            }
+            onRenamed()
+            val notice = if (titles.isEmpty()) "Renamed." else try {
+                withContext(Dispatchers.IO) { homeAssistantClient.renameEntries(titles) }
+                "Renamed in Tuya and Home Assistant."
+            } catch (e: HomeAssistantException) {
+                "Renamed in Tuya, but not in Home Assistant: ${homeAssistantMessage(e, current.settings)}"
+            }
+            update { copy(renaming = false, notice = notice) }
+        }
+    }
 
     private suspend fun publishDataPoint(device: ActivatedDevice, id: String, value: Any) = sdkLock.withLock {
         val account = checkNotNull(deviceAccount) { "No Tuya account owns this device session" }

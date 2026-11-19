@@ -354,6 +354,22 @@ class HomeAssistantClient(
         return targets.size
     }
 
+    /** Sets each config entry's title, and the same name on every Home Assistant device that entry created. */
+    fun renameEntries(titles: Map<String, String>) = withVerifiedSession { session ->
+        val registry = session.callCommand("config/device_registry/list").getJSONArray("result")
+            ?: throw invalidResponse("Home Assistant returned no device registry.")
+        titles.forEach { (entryId, title) ->
+            session.callCommand("config_entries/update", mapOf("entry_id" to entryId, "title" to title))
+            for (index in 0 until registry.size) {
+                val device = registry.getJSONObject(index)
+                val configEntries = device.getJSONArray("config_entries")
+                    ?: throw invalidResponse("A Home Assistant device has no config_entries list.")
+                if ((0 until configEntries.size).none { configEntries.getString(it) == entryId }) continue
+                session.callCommand("config/device_registry/update", mapOf("device_id" to device.getString("id"), "name_by_user" to title))
+            }
+        }
+    }
+
     private fun <T> withVerifiedSession(block: (WebSocketSession) -> T): T {
         val reconnectDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RECONNECT_WINDOW_SECONDS)
         while (true) {

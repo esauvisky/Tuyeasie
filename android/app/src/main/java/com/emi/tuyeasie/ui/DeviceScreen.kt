@@ -54,12 +54,13 @@ import com.emi.tuyeasie.ui.theme.LocalHaBar
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DeviceScreen(state: OnboardingUiState, viewModel: OnboardingViewModel, onOpenSettings: () -> Unit, onUnpair: (() -> Unit)?) {
+fun DeviceScreen(state: OnboardingUiState, viewModel: OnboardingViewModel, onOpenSettings: () -> Unit, onRename: (String) -> Unit, onUnpair: (() -> Unit)?) {
     val device = checkNotNull(state.activatedDevice) { "Device screen without a device" }
-    val busy = state.activationStatus == ActivationStatus.ACTIVATING || state.onvifStatus == OnvifStatus.CONFIGURING ||
+    val busy = state.renaming || state.activationStatus == ActivationStatus.ACTIVATING || state.onvifStatus == OnvifStatus.CONFIGURING ||
         state.integrationOptions.any { it.status == IntegrationStatus.ADDING }
     val bar = LocalHaBar.current
     var menuOpen by remember { mutableStateOf(false) }
+    var renameOpen by remember { mutableStateOf(false) }
     var dataPointsOpen by rememberSaveable(device.deviceId) { mutableStateOf(false) }
     if (dataPointsOpen) {
         DataPointsScreen(state, viewModel) { dataPointsOpen = false }
@@ -87,6 +88,7 @@ fun DeviceScreen(state: OnboardingUiState, viewModel: OnboardingViewModel, onOpe
                         Icon(Icons.Outlined.MoreVert, contentDescription = "More for ${device.name}")
                     }
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(text = { Text("Rename") }, onClick = { menuOpen = false; renameOpen = true })
                         DropdownMenuItem(text = { Text("Unpair", color = MaterialTheme.colorScheme.error) }, onClick = { menuOpen = false; onUnpair() })
                     }
                     }
@@ -102,6 +104,26 @@ fun DeviceScreen(state: OnboardingUiState, viewModel: OnboardingViewModel, onOpe
             AdvancedCard(state, viewModel)
         }
     }
+    if (renameOpen) RenameDialog(device.name, onRename) { renameOpen = false }
+}
+
+@Composable
+private fun RenameDialog(current: String, onRename: (String) -> Unit, onDismiss: () -> Unit) {
+    var name by remember { mutableStateOf(current) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Rename device") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(name, { name = it }, label = { Text("Name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                Text("The name changes in Tuya and on everything added to Home Assistant.", style = MaterialTheme.typography.bodyMedium)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onDismiss(); onRename(name.trim()) }, enabled = name.isNotBlank() && name.trim() != current) { Text("Rename") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
 }
 
 @Composable
