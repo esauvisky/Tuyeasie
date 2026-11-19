@@ -97,6 +97,7 @@ fun DeviceScreen(state: OnboardingUiState, viewModel: OnboardingViewModel, onOpe
         }
     ) { padding ->
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(padding).padding(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            AddressCard(state)
             HomeAssistantIntegrationsCard(state, viewModel, onOpenSettings)
             NetworkCard(state, viewModel)
             DataPointsLink(state) { dataPointsOpen = true }
@@ -206,6 +207,22 @@ private fun IntegrationChooserDialog(state: OnboardingUiState, viewModel: Onboar
 }
 
 @Composable
+private fun AddressCard(state: OnboardingUiState) {
+    val report = state.networkReport ?: return
+    HaCard(title = null) {
+        EntityRow(
+            icon = { EntityIcon(Icons.Outlined.Router, RowTone.NEUTRAL) },
+            title = report.ip ?: "No LAN address found",
+            state = listOfNotNull(
+                state.capabilities?.mac,
+                report.addressSource?.label,
+                "Scanned ${DateUtils.getRelativeTimeSpanString(report.scannedAt)}"
+            ).joinToString(" · ")
+        )
+    }
+}
+
+@Composable
 private fun NetworkCard(state: OnboardingUiState, viewModel: OnboardingViewModel) {
     val report = state.networkReport
     val scanning = state.scanStatus == ScanStatus.SCANNING
@@ -216,15 +233,6 @@ private fun NetworkCard(state: OnboardingUiState, viewModel: OnboardingViewModel
             if (!scanning && state.scanError == null) CardText("Not scanned yet.")
             return@HaCard
         }
-        EntityRow(
-            icon = { EntityIcon(Icons.Outlined.Router, RowTone.NEUTRAL) },
-            title = report.ip ?: "No LAN address found",
-            state = listOfNotNull(
-                state.capabilities?.mac,
-                report.addressSource?.label,
-                "Scanned ${DateUtils.getRelativeTimeSpanString(report.scannedAt)}"
-            ).joinToString(" · ")
-        )
         if (report.openPorts.isEmpty()) CardText("No open TCP ports.")
         report.openPorts.forEach { port ->
             EntityRow(
