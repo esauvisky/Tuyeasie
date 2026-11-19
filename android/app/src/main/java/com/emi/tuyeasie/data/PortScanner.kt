@@ -26,6 +26,7 @@ object PortScanner {
     private const val BANNER_TIMEOUT_MS = 800
     private const val PROBE_TIMEOUT_MS = 1500
     private const val PROGRESS_STEP = 500
+    private const val ONLINE_TIMEOUT_MS = 1000
 
     /** [onProgress] is called from scanner threads. */
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -33,7 +34,8 @@ object PortScanner {
         withContext(Dispatchers.IO.limitedParallelism(512)) {
             coroutineScope {
                 val done = AtomicInteger()
-                val open = (1..LAST_PORT).map { port ->
+                // Each open port is identified as soon as it is found, while the rest of the sweep is still running.
+                (1..LAST_PORT).map { port ->
                     async {
                         val isOpen = try {
                             Socket().use { it.connect(InetSocketAddress(ip, port), CONNECT_TIMEOUT_MS) }
@@ -47,12 +49,33 @@ object PortScanner {
                         }
                         val count = done.incrementAndGet()
                         if (count % PROGRESS_STEP == 0 || count == LAST_PORT) onProgress(count, LAST_PORT)
-                        if (isOpen) port else null
+                        if (isOpen) identify(ip, port) else null
                     }
                 }.awaitAll().filterNotNull()
-                open.map { port -> async { identify(ip, port) } }.awaitAll()
             }
         }
+
+    /** Whether the device still answers on a port that was open at its last scan; null when there is nothing to try. */
+    suspend fun isOnline(report: NetworkReport?): Boolean? {
+        val ip = report?.ip ?: return null
+        if (report.openPorts.isEmpty()) return null
+        return withContext(Dispatchers.IO) {
+            report.openPorts.map { open ->
+                async {
+                    try {
+                        Socket().use { it.connect(InetSocketAddress(ip, open.port), ONLINE_TIMEOUT_MS) }
+                        true
+                    } catch (e: ConnectException) {
+                        false
+                    } catch (e: SocketTimeoutException) {
+                        false
+                    } catch (e: NoRouteToHostException) {
+                        false
+                    }
+                }
+            }.awaitAll().any { it }
+        }
+    }
 
     fun guessRtspStreams(
         ip: String,

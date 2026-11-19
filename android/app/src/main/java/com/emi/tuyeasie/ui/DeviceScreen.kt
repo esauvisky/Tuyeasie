@@ -212,16 +212,19 @@ private fun IntegrationChooserDialog(state: OnboardingUiState, viewModel: Onboar
 @Composable
 private fun AddressCard(state: OnboardingUiState) {
     val report = state.networkReport ?: return
+    val now = System.currentTimeMillis()
+    val age = if (now - report.scannedAt < DateUtils.MINUTE_IN_MILLIS) "just now"
+    else DateUtils.getRelativeTimeSpanString(report.scannedAt, now, DateUtils.MINUTE_IN_MILLIS, DateUtils.FORMAT_ABBREV_RELATIVE)
     HaCard(title = null) {
         EntityRow(
             icon = { EntityIcon(Icons.Outlined.Router, RowTone.NEUTRAL) },
             title = report.ip ?: "No LAN address found",
-            state = listOfNotNull(
-                // Tuya reports an empty MAC for some devices.
-                state.capabilities?.mac?.takeIf { it.isNotBlank() },
-                report.addressSource?.label,
-                "Scanned ${DateUtils.getRelativeTimeSpanString(report.scannedAt)}"
-            ).joinToString(" · ")
+            state = listOfNotNull(state.online?.let { if (it) "Online" else "Offline" }, "Scanned $age").joinToString(" · "),
+            tone = when (state.online) {
+                true -> RowTone.OK
+                false -> RowTone.FAILED
+                null -> RowTone.NEUTRAL
+            }
         )
     }
 }
@@ -285,6 +288,9 @@ private fun AdvancedCard(state: OnboardingUiState, viewModel: OnboardingViewMode
             CopyField("Product ID", device.productId) { copy("Tuya product ID", device.productId) }
             device.protocolVersion?.let { CopyField("Protocol version", it) { copy("Tuya protocol version", it) } }
             device.category?.let { CopyField("Category", it) { copy("Tuya category", it) } }
+            // Tuya reports an empty MAC for some devices.
+            state.capabilities?.mac?.takeIf { it.isNotBlank() }?.let { CopyField("MAC address", it) { copy("MAC address", it) } }
+            state.networkReport?.addressSource?.let { CopyField("Address found by", it.label) { copy("Address source", it.label) } }
             if (info == null && record == null && state.capabilities?.tuyaOnvif != true && main == null) return@Disclosure
             info?.let { CopyField("ONVIF service URL", it.serviceUrl) { clipboard.setPrimaryClip(ClipData.newPlainText("ONVIF service URL", it.serviceUrl)) } }
             main?.let { CopyField("Main RTSP URL", it) { clipboard.setPrimaryClip(ClipData.newPlainText("Main RTSP URL", it)) } }

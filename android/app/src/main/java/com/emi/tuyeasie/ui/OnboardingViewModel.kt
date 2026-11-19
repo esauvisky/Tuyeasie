@@ -32,6 +32,7 @@ import com.emi.tuyeasie.data.NearbyNetwork
 import com.emi.tuyeasie.data.NetworkReport
 import com.emi.tuyeasie.data.ManualDataPoint
 import com.emi.tuyeasie.data.OnvifClient
+import com.emi.tuyeasie.data.DiscoveredOnvif
 import com.emi.tuyeasie.data.OnvifDiscovery
 import com.emi.tuyeasie.data.OnvifException
 import com.emi.tuyeasie.data.OnvifInfo
@@ -51,6 +52,7 @@ import com.emi.tuyeasie.hass.HomeAssistantError
 import com.emi.tuyeasie.hass.HomeAssistantException
 import com.emi.tuyeasie.hass.HomeAssistantProtocol
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
@@ -88,6 +90,8 @@ data class OnboardingUiState(
     // Names given while this screen lived; the Devices list only learns them on its next refresh.
     val sessionDeviceNames: List<String> = emptyList(),
     val removingIntegrations: Set<String> = emptySet(),
+    // Null until checked, and for a device with no open port to try.
+    val online: Boolean? = null,
     val settings: AppSettings = AppSettings(),
     val testingConnection: Boolean = false,
     val connectionVerified: Boolean = false,
@@ -136,6 +140,7 @@ private fun OnboardingUiState.withoutDeviceState() = copy(
     chooserSelection = emptySet(),
     integrationOptions = emptyList(),
     removingIntegrations = emptySet(),
+    online = null,
     manualDataPoints = emptyMap(),
     onvifProgress = null,
     onvifStatus = OnvifStatus.IDLE,
@@ -839,8 +844,43 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
             )
         }
         viewModelScope.launch {
-            if (current.networkReport == null) rescanNetwork()
+            // A scan ends with the same check against Home Assistant.
+            if (current.networkReport == null) {
+                rescanNetwork()
+                return@launch
+            }
+            launch {
+                val online = PortScanner.isOnline(current.networkReport)
+                update { if (activatedDevice?.deviceId == device.deviceId) copy(online = online) else this }
+            }
+            try {
+                syncIntegrations(device.deviceId)
+            } catch (e: HomeAssistantException) {
+                update { copy(connectionVerified = false, connectionError = homeAssistantMessage(e, settings)) }
+            }
         }
+    }
+
+    // Entries deleted in Home Assistant by hand go back to "not added"; the rest get their current device link.
+    private suspend fun syncIntegrations(deviceId: String) {
+        val saved = withContext(Dispatchers.IO) { store.loadIntegrationOptions(deviceId) }
+        val added = saved.filter { it.status == IntegrationStatus.ADDED }
+        if (added.isEmpty()) return
+        val live = withContext(Dispatchers.IO) {
+            homeAssistantClient.entryAssociations(
+                added.associate { checkNotNull(it.entryId) { "Added ${it.key} has no entry ID" } to checkNotNull(it.handler) { "Added ${it.key} has no handler" } }
+            )
+        }
+        val synced = saved.map { option ->
+            if (option.status != IntegrationStatus.ADDED) return@map option
+            val association = live[option.entryId]
+                ?: return@map option.copy(status = IntegrationStatus.AVAILABLE, entryId = null, deviceRegistryId = null, openUrl = null,
+                    updatedAt = System.currentTimeMillis())
+            option.copy(deviceRegistryId = association.deviceRegistryId, openUrl = association.openUrl)
+        }
+        if (synced == saved) return
+        withContext(Dispatchers.IO) { store.saveIntegrationOptions(deviceId, synced) }
+        update { if (activatedDevice?.deviceId == deviceId) copy(integrationOptions = synced) else this }
     }
 
     fun closeDeviceScreen() {
@@ -1048,11 +1088,12 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     private fun probeServices(
         address: DeviceAddress,
         ports: List<OpenPort>,
-        preferred: Credentials?
+        preferred: Credentials?,
+        discovered: List<DiscoveredOnvif>
     ): Pair<NetworkReport, Credentials?> {
         val candidates = Credentials.candidates(preferred)
         val serviceUrls = (
-            OnvifDiscovery.discover(getApplication()).filter { it.ip == address.ip }.flatMap { it.serviceUrls } +
+            discovered.filter { it.ip == address.ip }.flatMap { it.serviceUrls } +
                 ports.filter { it.service == PortScanner.SERVICE_ONVIF }
                     .map { "http://${address.ip}:${it.port}/onvif/device_service" }
             ).distinct()
@@ -1098,18 +1139,20 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
             update { if (activatedDevice?.deviceId == deviceId && scanGeneration.get() == generation) transform() else this }
         updateIfCurrent { copy(scanStatus = ScanStatus.SCANNING, scanProgress = "Scanning ports on ${address.ip}…", scanError = null) }
         viewModelScope.launch {
+            // ONVIF discovery listens for a fixed three seconds, so it runs alongside the port scan.
+            val discovery = async(Dispatchers.IO) { OnvifDiscovery.discover(getApplication()) }
             val ports = PortScanner.scan(address.ip) { done, total ->
                 viewModelScope.launch { updateIfCurrent { copy(scanProgress = "Scanning ports: $done of $total") } }
             }
             if (scanGeneration.get() != generation) return@launch
             updateIfCurrent { copy(scanProgress = "Checking services on ${address.ip}…") }
             val preferred = withContext(Dispatchers.IO) { preferredCredentials(deviceId) }
-            val (report, matchedCredentials) = withContext(Dispatchers.IO) { probeServices(address, ports, preferred) }
+            val (report, matchedCredentials) = withContext(Dispatchers.IO) { probeServices(address, ports, preferred, discovery.await()) }
             if (scanGeneration.get() != generation) return@launch
             withContext(Dispatchers.IO) { store.saveNetworkReport(deviceId, report) }
             // Without Home Assistant the flow handlers are unknown, so the saved catalog stays as it was.
             val handlers = try {
-                withContext(Dispatchers.IO) { homeAssistantClient.availableFlowHandlers() }
+                withContext(Dispatchers.IO) { homeAssistantClient.availableFlowHandlers() }.also { syncIntegrations(deviceId) }
             } catch (e: HomeAssistantException) {
                 updateIfCurrent { copy(connectionVerified = false, connectionError = homeAssistantMessage(e, settings)) }
                 null
@@ -1126,6 +1169,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
             updateIfCurrent {
                 copy(
                     networkReport = report,
+                    online = if (report.openPorts.isEmpty()) null else true,
                     integrationOptions = options,
                     scanStatus = ScanStatus.IDLE,
                     scanProgress = null,

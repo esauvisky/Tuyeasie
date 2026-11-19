@@ -60,6 +60,7 @@ fun DevicesScreen(
             devices.forEach { (entry, device) ->
                 var menuOpen by remember { mutableStateOf(false) }
                 val enabled = configureEnabled && state.unpairingDeviceId == null
+                val online = state.online[device.deviceId]
                 Box {
                     EntityRow(
                         icon = {
@@ -71,7 +72,14 @@ fun DevicesScreen(
                             )
                         },
                         title = device.name,
-                        state = listOfNotNull(lanAddress(device.activated.ip), entry.saved.kind.label, device.homeName).joinToString(" · "),
+                        state = listOfNotNull(
+                            online?.let { if (it) "Online" else "Offline" }, lanAddress(device.activated.ip), entry.saved.kind.label, device.homeName
+                        ).joinToString(" · "),
+                        tone = when (online) {
+                            true -> RowTone.OK
+                            false -> RowTone.FAILED
+                            null -> RowTone.NEUTRAL
+                        },
                         enabled = enabled,
                         onClick = { onConfigureDevice(entry.saved, device) },
                         onLongClick = { menuOpen = true }

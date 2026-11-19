@@ -1,6 +1,7 @@
 package com.emi.tuyeasie.hass
 
 import com.alibaba.fastjson.JSON
+import com.alibaba.fastjson.JSONArray
 import com.alibaba.fastjson.JSONException
 import com.alibaba.fastjson.JSONObject
 import com.emi.tuyeasie.data.ActivatedDevice
@@ -71,26 +72,35 @@ class HomeAssistantClient(
         return (0 until handlers.size).map { index -> handlers.getString(index) }.toSet()
     }
 
-    fun entryAssociation(entryId: String, domain: String): HaEntryAssociation {
-        val session = openVerifiedSession()
-        session.use {
-            val entries = session.callCommand("config/device_registry/list").getJSONArray("result")
-                ?: throw invalidResponse("Home Assistant returned no device registry.")
-            val device = (0 until entries.size)
-                .map { entries.getJSONObject(it) }
-                .firstOrNull { candidate ->
-                    val configEntries = candidate.getJSONArray("config_entries")
-                        ?: throw invalidResponse("A Home Assistant device has no config entries.")
-                    (0 until configEntries.size).any { configEntries.getString(it) == entryId }
-                }
-            val registryId = device?.getString("id")
-            val openUrl = if (registryId != null) {
-                settingsStore.loadSettings().hassUrl.trimEnd('/') + "/config/devices/device/$registryId"
-            } else {
-                settingsStore.loadSettings().hassUrl.trimEnd('/') + "/config/integrations/integration/$domain#config_entry=$entryId"
+    fun entryAssociation(entryId: String, domain: String): HaEntryAssociation =
+        openVerifiedSession().use { session -> association(deviceRegistry(session), entryId, domain) }
+
+    /** The current device link of every entry (ID to domain) that still exists; entries deleted in Home Assistant are absent. */
+    fun entryAssociations(domains: Map<String, String>): Map<String, HaEntryAssociation> = withVerifiedSession { session ->
+        val entries = session.callCommand("config_entries/get").getJSONArray("result")
+            ?: throw invalidResponse("Home Assistant returned no config-entry list.")
+        val existing = (0 until entries.size).map { entries.getJSONObject(it).getString("entry_id") }.toSet()
+        val registry = deviceRegistry(session)
+        domains.filterKeys { it in existing }.mapValues { (entryId, domain) -> association(registry, entryId, domain) }
+    }
+
+    private fun deviceRegistry(session: WebSocketSession): JSONArray =
+        session.callCommand("config/device_registry/list").getJSONArray("result")
+            ?: throw invalidResponse("Home Assistant returned no device registry.")
+
+    private fun association(registry: JSONArray, entryId: String, domain: String): HaEntryAssociation {
+        val device = (0 until registry.size)
+            .map { registry.getJSONObject(it) }
+            .firstOrNull { candidate ->
+                val configEntries = candidate.getJSONArray("config_entries")
+                    ?: throw invalidResponse("A Home Assistant device has no config entries.")
+                (0 until configEntries.size).any { configEntries.getString(it) == entryId }
             }
-            return HaEntryAssociation(entryId, registryId, openUrl)
-        }
+        val registryId = device?.getString("id")
+        val base = settingsStore.loadSettings().hassUrl.trimEnd('/')
+        val openUrl = if (registryId != null) "$base/config/devices/device/$registryId"
+        else "$base/config/integrations/integration/$domain#config_entry=$entryId"
+        return HaEntryAssociation(entryId, registryId, openUrl)
     }
 
     fun addIntegration(option: HaIntegrationOption, device: ActivatedDevice, report: NetworkReport, credentials: Credentials?): HaEntryAssociation {
@@ -99,7 +109,10 @@ class HomeAssistantClient(
                 device.copy(ip = checkNotNull(report.ip) { "Tuya Local needs a LAN address" }),
                 report.onvif?.streams?.firstOrNull()?.url,
                 report.onvif?.streams?.getOrNull(1)?.url
-            ).entryId
+            ).entryId.also { entryId ->
+                // Tuya Local ships its camera entities disabled.
+                openVerifiedSession().use { session -> enableCameraEntities(session, setOf(entryId)) }
+            }
             "onvif" -> {
                 val service = checkNotNull(report.onvif) { "No ONVIF service probe result is available" }
                 val uri = java.net.URI(service.serviceUrl)

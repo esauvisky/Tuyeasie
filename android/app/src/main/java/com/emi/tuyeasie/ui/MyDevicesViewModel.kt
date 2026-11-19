@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.emi.tuyeasie.data.BackupExporter
+import com.emi.tuyeasie.data.PortScanner
 import com.emi.tuyeasie.data.SavedTuyaAccount
 import com.emi.tuyeasie.data.SecureSettingsStore
 import com.emi.tuyeasie.data.TuyaAccountKind
@@ -16,6 +17,9 @@ import com.emi.tuyeasie.hass.HomeAssistantException
 import java.io.IOException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -47,6 +51,8 @@ data class MyDevicesUiState(
     val confirmation: MyDevicesConfirmation? = null,
     // True from the start of a refresh until every account is loaded and duplicate names are numbered.
     val refreshing: Boolean = false,
+    // Devices absent here were never scanned or had no open port, so there is nothing to try.
+    val online: Map<String, Boolean> = emptyMap(),
     val unpairingDeviceId: String? = null,
     val actionError: String? = null,
     val backupDialogOpen: Boolean = false,
@@ -123,10 +129,22 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
         // A newer refresh replaces one still running, so the list never settles on the older answer.
         refreshJob?.cancel()
         refreshJob = viewModelScope.launch {
+            // The cached list is checked right away; signing in to Tuya takes seconds.
+            val cached = launch { checkOnline() }
             saved.forEach { loadDevices(it) }
             saveNumberedNames()
             _uiState.update { it.copy(refreshing = false) }
+            cached.join()
+            checkOnline()
         }
+    }
+
+    private suspend fun checkOnline() {
+        val ids = _uiState.value.accounts.flatMap { it.devices.orEmpty() }.map { it.deviceId }
+        val checked = coroutineScope {
+            ids.map { id -> async { id to PortScanner.isOnline(withContext(Dispatchers.IO) { store.loadNetworkReport(id) }) } }.awaitAll()
+        }
+        _uiState.update { state -> state.copy(online = checked.mapNotNull { (id, online) -> online?.let { id to it } }.toMap()) }
     }
 
     // Saved to Tuya once, so a device paired later can never shift the numbers of the ones already there.
