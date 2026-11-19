@@ -130,9 +130,9 @@ data class OnvifInfo(
 )
 
 enum class AddressSource(val label: String) {
-    ONVIF_DATA_POINT("Reported by the camera through Tuya"),
-    TUYA_LAN("Found by its Tuya LAN broadcast"),
-    ONVIF_DISCOVERY("Found by ONVIF discovery, matched by MAC")
+    ONVIF_DATA_POINT("Reported by the camera"),
+    TUYA_LAN("Tuya LAN discovery"),
+    ONVIF_DISCOVERY("ONVIF discovery")
 }
 
 data class NetworkReport(

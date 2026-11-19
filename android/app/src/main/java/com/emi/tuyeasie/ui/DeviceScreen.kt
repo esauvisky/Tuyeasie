@@ -206,10 +206,10 @@ private fun NetworkCard(state: OnboardingUiState, viewModel: OnboardingViewModel
             icon = { EntityIcon(Icons.Outlined.Router, RowTone.NEUTRAL) },
             title = report.ip ?: "No LAN address found",
             state = listOfNotNull(
+                state.capabilities?.mac,
                 report.addressSource?.label,
-                state.capabilities?.mac?.let { "MAC $it" },
                 "Scanned ${DateUtils.getRelativeTimeSpanString(report.scannedAt)}"
-            ).joinToString("\n")
+            ).joinToString(" · ")
         )
         if (report.openPorts.isEmpty()) CardText("No open TCP ports.")
         report.openPorts.forEach { port ->
@@ -219,7 +219,6 @@ private fun NetworkCard(state: OnboardingUiState, viewModel: OnboardingViewModel
                 state = listOfNotNull("Port ${port.port}", port.detail).joinToString(" · ")
             )
         }
-        CardText("Checked all 65,535 TCP ports. UDP is not scanned.")
     }
 }
 

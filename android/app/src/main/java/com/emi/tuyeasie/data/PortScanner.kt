@@ -145,7 +145,7 @@ object PortScanner {
         }
         val rtsp = RtspClient.options(ip, port, PROBE_TIMEOUT_MS)
         if (rtsp != null) {
-            return OpenPort(port, SERVICE_RTSP, "Video stream (RTSP)", rtsp.headers["server"]?.let { "Server: ${it.first()}" })
+            return OpenPort(port, SERVICE_RTSP, "Video stream (RTSP)", rtsp.headers["server"]?.first())
         }
         val http = probeHttp(ip, port)
         val onvif = probeOnvif(ip, port)
@@ -155,8 +155,7 @@ object PortScanner {
             val name = if (known?.label == "HTTPS") known.name else "Encrypted service (TLS)"
             return OpenPort(port, "TLS", name, null)
         }
-        val unconfirmed = if (known != null) "Guessed from the port number; no probe got an answer" else "No probe got an answer"
-        return OpenPort(port, fallbackService, known?.name ?: "Unknown service", banner?.let { "Says: $it" } ?: unconfirmed)
+        return OpenPort(port, fallbackService, known?.name ?: "Unknown service", banner ?: known?.let { "Unconfirmed" })
     }
 
     private const val TELNET_NEGOTIATION = "Telnet option negotiation"
@@ -197,13 +196,13 @@ object PortScanner {
         val access = when {
             code == null || code in 200..299 -> null
             code == 401 || code == 403 -> "Login required"
-            code in 300..399 -> "Redirects elsewhere"
+            code in 300..399 -> "Redirects"
             else -> "Answers $status"
         }
         return listOfNotNull(
             title?.takeIf { it.isNotEmpty() }?.let { "\"$it\"" },
             access,
-            reply.headers["server"]?.let { "Server: ${it.first()}" }
+            reply.headers["server"]?.first()
         ).joinToString(" · ")
     }
 
