@@ -8,7 +8,7 @@ It is an Android app that pairs a Tuya device from your phone and adds it to Hom
 
 ## Quick start
 
-1. Install [Tuya Local](https://github.com/make-all/tuya-local) in Home Assistant.
+1. Install [Tuya Local](https://github.com/make-all/tuya-local) or [Local Tuya](https://github.com/xZetsubou/hass-localtuya) in Home Assistant.
 2. In Home Assistant, create a long-lived access token on an administrator account.
 3. Install the APK from [GitHub Releases](https://github.com/esauvisky/Tuyeasie/releases).
 4. In the app, open Settings and enter the Home Assistant URL, the token, and the 2.4 GHz Wi-Fi your devices should join.
@@ -20,7 +20,7 @@ The phone and Home Assistant must be on the same network. Pairing uses the inter
 ## Features
 
 - **Pair from your phone.** Bluetooth and Wi-Fi hotspot pairing, without Smart Life or a Tuya developer account. The app creates a Tuya account in the background, or asks for one when the device needs it.
-- **Add to Home Assistant.** Works with devices supported by [Tuya Local](https://github.com/make-all/tuya-local), with additional ONVIF and RTSP support for cameras. The app checks both the device's capabilities and your installed integrations before offering setup options.
+- **Add to Home Assistant.** Works with devices supported by [Tuya Local](https://github.com/make-all/tuya-local), and with any device through [Local Tuya](https://github.com/xZetsubou/hass-localtuya), which gets one entity per data point. Additional ONVIF and RTSP support for cameras. The app checks both the device's capabilities and your installed integrations before offering setup options.
 - **See what is on your network.** Automatic IP discovery, online status, and a full TCP port scan that identifies the services answering on each open port.
 - **Read and write data points.** View the device's schema and live values, with controls for booleans, enums, numbers, bitmaps, strings and raw hex.
 - **Access device information.** Copy local keys, device IDs, product IDs and network details without a separate tool.
@@ -48,4 +48,4 @@ These can be combined: use Tuya Local for controls and ONVIF or Generic Camera f
 
 ## License
 
-MIT. The overlay keeps tuya-local's license in `tuya-local/LICENSE.md`.
+MIT.
