@@ -134,6 +134,12 @@ private fun HomeAssistantIntegrationsCard(state: OnboardingUiState, viewModel: O
     val uriHandler = LocalUriHandler.current
     var removing by remember { mutableStateOf<String?>(null) }
     HaCard(title = "Home Assistant") {
+        if (!state.settings.homeAssistantConfigured) {
+            EntityRow(icon = { EntityIcon(Icons.Outlined.Home, RowTone.NEUTRAL) }, title = "Not set up", state = "Add a URL and token to add this device") {
+                CardAction("Settings", onOpenSettings)
+            }
+            return@HaCard
+        }
         state.connectionError?.let { error ->
             EntityRow(icon = { EntityIcon(Icons.Outlined.Home, RowTone.FAILED) }, title = "Connection", state = error, tone = RowTone.FAILED) {
                 CardAction("Settings", onOpenSettings)

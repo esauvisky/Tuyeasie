@@ -76,11 +76,12 @@ fun PairScreen(
 @Composable
 private fun SetupCard(state: OnboardingUiState, viewModel: OnboardingViewModel) {
     HaCard(title = "Connect Home Assistant") {
-        CardText("Devices are imported into Tuya Local. Use an administrator long-lived access token.")
+        CardText("Home Assistant is optional. Enter its URL and an administrator long-lived access token to add devices to it, " +
+            "or leave both empty to only pair devices with Tuya and get their local keys.")
         HomeAssistantFields(state, viewModel)
         WifiFields(state, viewModel)
         state.connectionError?.let { InlineError(it) }
-        HomeAssistantActions(state, viewModel, "Connect")
+        HomeAssistantActions(state, viewModel, if (state.settings.homeAssistantConfigured) "Connect" else "Continue")
     }
 }
 

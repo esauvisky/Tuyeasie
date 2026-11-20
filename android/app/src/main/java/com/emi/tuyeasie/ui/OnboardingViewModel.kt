@@ -387,7 +387,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         viewModelScope.launch {
             val settings = withContext(Dispatchers.IO) { store.loadSettings() }
             update { copy(isLoading = false, settings = settings) }
-            // A saved, complete setup goes straight to pairing once Home Assistant answers.
+            // A saved, complete setup goes straight to pairing, once Home Assistant answers when one is set.
             if (validateSettings(settings) == null) testConnection()
         }
     }
@@ -461,6 +461,14 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         val validationError = validateSettings(settings)
         if (validationError != null) {
             update { copy(connectionError = validationError) }
+            return
+        }
+        if (!settings.homeAssistantConfigured) {
+            update { copy(settings = settings, connectionVerified = false, connectionError = null) }
+            viewModelScope.launch {
+                withContext(Dispatchers.IO) { store.saveSettings(settings) }
+                if (current.stage == PairStage.SETUP) enterNearby()
+            }
             return
         }
         update {
@@ -865,6 +873,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 val online = PortScanner.isOnline(current.networkReport)
                 update { if (activatedDevice?.deviceId == device.deviceId) copy(online = online) else this }
             }
+            if (!current.settings.homeAssistantConfigured) return@launch
             try {
                 syncIntegrations(device.deviceId)
             } catch (e: HomeAssistantException) {
@@ -1163,7 +1172,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
             if (scanGeneration.get() != generation) return@launch
             withContext(Dispatchers.IO) { store.saveNetworkReport(deviceId, report) }
             // Without Home Assistant the flow handlers are unknown, so the saved catalog stays as it was.
-            val handlers = try {
+            val handlers = if (!current.settings.homeAssistantConfigured) null else try {
                 withContext(Dispatchers.IO) { homeAssistantClient.availableFlowHandlers() }.also { syncIntegrations(deviceId) }
             } catch (e: HomeAssistantException) {
                 updateIfCurrent { copy(connectionVerified = false, connectionError = homeAssistantMessage(e, settings)) }
@@ -1250,6 +1259,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
             withContext(Dispatchers.IO) { store.saveNetworkReport(device.deviceId, report) }
             val online = PortScanner.isOnline(report)
             updateIfCurrent { copy(networkReport = report, online = online, scanStatus = ScanStatus.IDLE, scanProgress = null) }
+            if (!current.settings.homeAssistantConfigured) return@launch
             try {
                 syncIntegrations(device.deviceId)
             } catch (e: HomeAssistantException) {
@@ -1584,7 +1594,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 if (open == null || open.deviceId != device.deviceId) this else copy(activatedDevice = open.copy(name = name))
             }
             onRenamed()
-            val notice = if (titles.isEmpty()) "Renamed." else try {
+            val notice = if (titles.isEmpty() || !current.settings.homeAssistantConfigured) "Renamed." else try {
                 withContext(Dispatchers.IO) {
                     homeAssistantClient.renameEntries(device.deviceId, titles)
                     if (renameEntityIds) homeAssistantClient.renameEntityIds(device.deviceId, titles.keys, device.name, name)
@@ -1673,8 +1683,8 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     )
 
     private fun validateSettings(settings: AppSettings): String? = when {
-        settings.hassUrl.isBlank() -> "Enter the Home Assistant URL."
-        settings.adminToken.isBlank() -> "Enter an admin long-lived access token."
+        settings.hassUrl.isBlank() != settings.adminToken.isBlank() ->
+            "Enter both the Home Assistant URL and an admin access token, or leave both empty to skip Home Assistant."
         settings.homeWifiSsid.isBlank() -> "Enter your home Wi-Fi name."
         else -> null
     }

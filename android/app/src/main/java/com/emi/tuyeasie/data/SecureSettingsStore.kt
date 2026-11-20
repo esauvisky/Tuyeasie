@@ -13,7 +13,11 @@ data class AppSettings(
     val countryCode: String = "55",
     val homeWifiSsid: String = "",
     val homeWifiPassword: String = ""
-)
+) {
+    // Home Assistant is optional: without a URL and token, devices are only paired with Tuya.
+    val homeAssistantConfigured: Boolean
+        get() = hassUrl.isNotBlank() && adminToken.isNotBlank()
+}
 
 data class ActivatedDevice(
     val deviceId: String,

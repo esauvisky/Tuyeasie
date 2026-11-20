@@ -35,8 +35,9 @@ fun SettingsScreen(state: OnboardingUiState, viewModel: OnboardingViewModel, dev
                 state.connectionError != null -> InlineError(state.connectionError)
                 state.connectionVerified -> Text("Connected with administrator access", style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.tertiary, modifier = Modifier.padding(horizontal = 16.dp))
+                !state.settings.homeAssistantConfigured -> CardText("Not set up. Devices are only paired with Tuya.")
             }
-            HomeAssistantActions(state, viewModel, "Save and test")
+            HomeAssistantActions(state, viewModel, if (state.settings.homeAssistantConfigured) "Save and test" else "Save")
         }
         HaCard(title = "Home Wi-Fi") {
             WifiFields(state, viewModel)

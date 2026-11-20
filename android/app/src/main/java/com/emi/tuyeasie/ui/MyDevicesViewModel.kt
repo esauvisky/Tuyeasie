@@ -178,7 +178,7 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
                 store.saveCachedDevices(saved.account.uid, devices)
                 entryTitles(name, store.loadIntegrationOptions(device.deviceId))
             }
-            if (titles.isEmpty()) continue
+            if (titles.isEmpty() || !store.loadSettings().homeAssistantConfigured) continue
             try {
                 withContext(Dispatchers.IO) { homeAssistantClient.renameEntries(device.deviceId, titles) }
             } catch (e: HomeAssistantException) {
@@ -273,7 +273,7 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
         val deviceId = confirmation.deviceId
         _uiState.update { it.copy(unpairingDeviceId = deviceId, actionError = null) }
         viewModelScope.launch {
-            if (confirmation.removeFromHomeAssistant && store.loadSettings().hassUrl.isNotBlank()) {
+            if (confirmation.removeFromHomeAssistant && store.loadSettings().homeAssistantConfigured) {
                 try {
                     withContext(Dispatchers.IO) {
                         homeAssistantClient.removeDevice(
