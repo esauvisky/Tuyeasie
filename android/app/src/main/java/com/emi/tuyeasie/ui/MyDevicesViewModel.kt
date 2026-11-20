@@ -180,7 +180,7 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
             }
             if (titles.isEmpty()) continue
             try {
-                withContext(Dispatchers.IO) { homeAssistantClient.renameEntries(titles) }
+                withContext(Dispatchers.IO) { homeAssistantClient.renameEntries(device.deviceId, titles) }
             } catch (e: HomeAssistantException) {
                 _uiState.update { it.copy(actionError = "$name was renamed in Tuya, but not in Home Assistant: ${e.publicMessage}") }
             }

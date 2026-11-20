@@ -880,6 +880,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         if (added.isEmpty()) return
         val live = withContext(Dispatchers.IO) {
             homeAssistantClient.entryAssociations(
+                deviceId,
                 added.associate { checkNotNull(it.entryId) { "Added ${it.key} has no entry ID" } to checkNotNull(it.handler) { "Added ${it.key} has no handler" } }
             )
         }
@@ -1411,6 +1412,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         val option = current.integrationOptions.single { it.key == key }
         val device = checkNotNull(current.activatedDevice) { "No device for integration" }
         val report = checkNotNull(current.networkReport) { "No completed device scan" }
+        val capabilities = checkNotNull(current.capabilities) { "No device schema for integration" }
         val adding = option.copy(status = IntegrationStatus.ADDING, error = null, updatedAt = System.currentTimeMillis())
         updateIntegration(key) { adding }
         viewModelScope.launch {
@@ -1420,7 +1422,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 val association = withContext(Dispatchers.IO) {
                     val credentials = record?.let { Credentials(it.username, it.password) }
                         ?: preferredCredentials(device.deviceId) ?: Credentials.DEFAULT
-                    homeAssistantClient.addIntegration(option, device, report, credentials)
+                    homeAssistantClient.addIntegration(option, device, report, credentials, capabilities.dataPoints)
                 }
                 persistIntegrationSuccess(key, association)
             } catch (e: HomeAssistantException) {
@@ -1440,7 +1442,10 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         update { copy(removingIntegrations = removingIntegrations + key) }
         viewModelScope.launch {
             try {
-                withContext(Dispatchers.IO) { homeAssistantClient.removeIntegrationEntry(entryId) }
+                withContext(Dispatchers.IO) {
+                    if (key == IntegrationKeys.LOCAL_TUYA) homeAssistantClient.removeLocalTuyaDevice(device.deviceId)
+                    else homeAssistantClient.removeIntegrationEntry(entryId)
+                }
             } catch (e: HomeAssistantException) {
                 update { copy(removingIntegrations = removingIntegrations - key, notice = "Not removed from Home Assistant: ${e.publicMessage}") }
                 return@launch
@@ -1581,8 +1586,8 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
             onRenamed()
             val notice = if (titles.isEmpty()) "Renamed." else try {
                 withContext(Dispatchers.IO) {
-                    homeAssistantClient.renameEntries(titles)
-                    if (renameEntityIds) homeAssistantClient.renameEntityIds(titles.keys, device.name, name)
+                    homeAssistantClient.renameEntries(device.deviceId, titles)
+                    if (renameEntityIds) homeAssistantClient.renameEntityIds(device.deviceId, titles.keys, device.name, name)
                 }
                 "Renamed in Tuya and Home Assistant."
             } catch (e: HomeAssistantException) {
@@ -1720,9 +1725,7 @@ private fun homeAssistantMessage(
         HomeAssistantError.CONNECTION_FAILED,
         HomeAssistantError.TIMEOUT ->
             "Home Assistant is unreachable. Check the URL, network, and that Home Assistant is running."
-        HomeAssistantError.UNSUPPORTED_PROFILE,
-        HomeAssistantError.UNSUPPORTED_PROTOCOL ->
-            "This device is not supported by the installed Tuya Local integration."
+        HomeAssistantError.UNSUPPORTED_PROFILE -> exception.publicMessage
         else -> exception.publicMessage
     }
     return sanitizeError(message, settings, device = null)

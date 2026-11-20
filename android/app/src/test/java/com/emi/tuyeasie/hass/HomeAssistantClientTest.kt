@@ -2,6 +2,7 @@ package com.emi.tuyeasie.hass
 
 import com.alibaba.fastjson.JSON
 import com.emi.tuyeasie.data.ActivatedDevice
+import com.emi.tuyeasie.data.TuyaDataPointSchema
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -21,88 +22,49 @@ class HomeAssistantClientTest {
     }
 
     @Test
-    fun constructsImportPayloadWithDefaultsAndOptionalFields() {
-        val device = ActivatedDevice(
-            deviceId = "test-device-id",
-            localKey = "test-local-key",
-            name = "Test device",
-            productId = "test-product-id",
-            protocolVersion = null,
-            category = null,
-            ip = null
-        )
-
-        val payload = HomeAssistantProtocol.importPayload(device, 42)
-
-        assertEquals(42L, payload["id"])
-        assertEquals("tuya_local/import_device", payload["type"])
-        assertEquals(1, payload["import_version"])
-        assertEquals("test-device-id", payload["device_id"])
-        assertEquals("test-local-key", payload["local_key"])
-        assertEquals("Test device", payload["name"])
-        assertEquals("test-product-id", payload["product_id"])
-        assertEquals("auto", payload["protocol_version"])
-        assertFalse(payload.containsKey("category"))
-        assertFalse(payload.containsKey("ip"))
-
-        val optionalPayload = HomeAssistantProtocol.importPayload(
-            device.copy(protocolVersion = "3.4", category = "switch", ip = "192.168.1.20"),
-            43
-        )
-        assertEquals("3.4", optionalPayload["protocol_version"])
-        assertEquals("switch", optionalPayload["category"])
-        assertEquals("192.168.1.20", optionalPayload["ip"])
-    }
-
-    @Test
-    fun normalizesUnsupportedProtocolAndOmitsBlankOrPublicMetadata() {
-        val device = ActivatedDevice(
-            deviceId = "id",
-            localKey = "key",
-            name = "name",
-            productId = "product",
-            protocolVersion = "3.4.1",
-            category = " ",
-            ip = "8.8.8.8"
-        )
-
-        val payload = HomeAssistantProtocol.importPayload(device, 44)
-
-        assertEquals("auto", payload["protocol_version"])
-        assertFalse(payload.containsKey("category"))
-        assertFalse(payload.containsKey("ip"))
-    }
-
-    @Test
     fun acceptsOnlyRfc1918IpAddresses() {
-        val device = ActivatedDevice("id", "key", "name", "product", "3.3", "switch", null)
-        val privateAddresses = listOf("10.0.0.1", "172.16.0.1", "172.31.255.254", "192.168.1.1")
-        val excludedAddresses = listOf(
-            "172.15.0.1", "172.32.0.1", "192.0.2.10", "256.1.1.1", "10.1.1", "not-an-ip", " "
-        )
-
-        privateAddresses.forEach { address ->
-            val payload = HomeAssistantProtocol.importPayload(device.copy(ip = address), 45)
-            assertEquals(address, payload["ip"])
+        listOf("10.0.0.1", "172.16.0.1", "172.31.255.254", "192.168.1.1").forEach { address ->
+            assertTrue("Expected $address to be private", HomeAssistantProtocol.isRfc1918Address(address))
         }
-        excludedAddresses.forEach { address ->
-            val payload = HomeAssistantProtocol.importPayload(device.copy(ip = address), 46)
-            assertFalse("Expected $address to be omitted", payload.containsKey("ip"))
+        listOf("172.15.0.1", "172.32.0.1", "192.0.2.10", "256.1.1.1", "10.1.1", "not-an-ip", " ").forEach { address ->
+            assertFalse("Expected $address to be rejected", HomeAssistantProtocol.isRfc1918Address(address))
         }
     }
 
     @Test
-    fun mapsDiscoveryFailureToLocalNetworkMessageWithoutChangingOtherCodes() {
-        val discovery = serverError("discovery_failed")
-
-        assertEquals(
-            "Home Assistant could not find the device on the local network. " +
-                "Check that it is powered on and connected to the same LAN.",
-            discovery.publicMessage
-        )
-        assertEquals(HomeAssistantError.UNKNOWN_COMMAND, serverError("unknown_command").error)
+    fun mapsWebSocketErrorCodes() {
         assertEquals(HomeAssistantError.UNAUTHORIZED, serverError("unauthorized").error)
+        assertEquals(HomeAssistantError.INVALID_FORMAT, serverError("invalid_format").error)
         assertEquals(HomeAssistantError.SERVER_ERROR, serverError("another_error").error)
+    }
+
+    @Test
+    fun buildsLocalTuyaDeviceAndEntities() {
+        fun dp(id: String, code: String, mode: String, schemaType: String, property: String, type: String = "obj") =
+            TuyaDataPointSchema(id, code, code, mode, type, property, schemaType)
+        val points = listOf(
+            dp("1", "switch_led", "rw", "bool", "{}"),
+            dp("2", "motion_alarm", "ro", "bool", "{}"),
+            dp("3", "night_mode", "rw", "enum", """{"range":["auto","off","on"]}"""),
+            dp("4", "temperature", "ro", "value", """{"min":-400,"max":800,"scale":1,"step":1,"unit":"°C"}"""),
+            dp("5", "volume", "rw", "value", """{"min":0,"max":10,"step":1}"""),
+            dp("6", "ptz_control", "rw", "raw", "{}", type = "raw")
+        )
+        val device = ActivatedDevice("dev", "key", "Garage camera", "product", "2.2", "sp", null)
+
+        val payload = HomeAssistantProtocol.localTuyaDevicePayload(device, "192.168.1.30", points)
+        assertEquals("auto", payload["protocol_version"])
+        assertEquals("1,2,3,4,5,6", payload["manual_dps_strings"])
+        assertEquals("3.4", HomeAssistantProtocol.localTuyaDevicePayload(device.copy(protocolVersion = "3.4"), "h", points)["protocol_version"])
+
+        val entities = HomeAssistantProtocol.localTuyaEntities(points)
+        assertEquals(listOf("switch", "binary_sensor", "select", "sensor", "number"), entities.map { it.platform })
+        assertEquals("Switch led", entities[0].fields["friendly_name"])
+        assertEquals(mapOf("auto" to "auto", "off" to "off", "on" to "on"), entities[2].fields["select_options"])
+        assertEquals(0.1, entities[3].fields["scaling"] as Double, 1e-9)
+        assertEquals("°C", entities[3].fields["unit_of_measurement"])
+        assertEquals(10.0, entities[4].fields["max_value"])
+        assertFalse(entities[4].fields.containsKey("scaling"))
     }
 
     @Test

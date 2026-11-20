@@ -57,6 +57,7 @@ enum class IntegrationStatus { AVAILABLE, ADDING, ADDED, FAILED }
 
 object IntegrationKeys {
     const val TUYA_LOCAL = "tuya_local"
+    const val LOCAL_TUYA = "localtuya"
     const val ONVIF = "onvif"
     const val GENERIC = "generic"
 }

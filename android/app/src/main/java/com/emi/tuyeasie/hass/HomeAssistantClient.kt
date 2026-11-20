@@ -8,8 +8,10 @@ import com.emi.tuyeasie.data.ActivatedDevice
 import com.emi.tuyeasie.data.Credentials
 import com.emi.tuyeasie.data.HaEntryAssociation
 import com.emi.tuyeasie.data.HaIntegrationOption
+import com.emi.tuyeasie.data.IntegrationKeys
 import com.emi.tuyeasie.data.NetworkReport
 import com.emi.tuyeasie.data.SecureSettingsStore
+import com.emi.tuyeasie.data.TuyaDataPointSchema
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -22,26 +24,11 @@ import java.io.IOException
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
-enum class ImportOutcome {
-    ADDED,
-    UPDATED,
-    ALREADY_PRESENT
-}
-
-data class ImportResult(
-    val outcome: ImportOutcome,
-    val entryId: String,
-    val loaded: Boolean
-)
-
 enum class HomeAssistantError {
-    UNKNOWN_COMMAND,
     UNAUTHORIZED,
     INVALID_FORMAT,
     HANDSHAKE_FAILED,
     UNSUPPORTED_PROFILE,
-    UNSUPPORTED_PROTOCOL,
-    DISCOVERY_FAILED,
     NON_ADMIN,
     CONNECTION_FAILED,
     INVALID_RESPONSE,
@@ -72,30 +59,39 @@ class HomeAssistantClient(
         return (0 until handlers.size).map { index -> handlers.getString(index) }.toSet()
     }
 
-    fun entryAssociation(entryId: String, domain: String): HaEntryAssociation =
-        openVerifiedSession().use { session -> association(deviceRegistry(session), entryId, domain) }
+    private fun entryAssociation(deviceId: String, entryId: String, domain: String): HaEntryAssociation =
+        openVerifiedSession().use { session ->
+            checkNotNull(association(deviceRegistry(session), deviceId, entryId, domain)) { "No Home Assistant device for the new $domain entry" }
+        }
 
-    /** The current device link of every entry (ID to domain) that still exists; entries deleted in Home Assistant are absent. */
-    fun entryAssociations(domains: Map<String, String>): Map<String, HaEntryAssociation> = withVerifiedSession { session ->
+    /**
+     * The current device link of every entry (ID to domain) that still exists; entries deleted in Home Assistant are
+     * absent, and so is a Local Tuya hub that no longer holds this device.
+     */
+    fun entryAssociations(deviceId: String, domains: Map<String, String>): Map<String, HaEntryAssociation> = withVerifiedSession { session ->
+        val existing = configEntries(session).map { it.getString("entry_id") }.toSet()
+        val registry = deviceRegistry(session)
+        domains.filterKeys { it in existing }
+            .mapNotNull { (entryId, domain) -> association(registry, deviceId, entryId, domain)?.let { entryId to it } }
+            .toMap()
+    }
+
+    private fun configEntries(session: WebSocketSession): List<JSONObject> {
         val entries = session.callCommand("config_entries/get").getJSONArray("result")
             ?: throw invalidResponse("Home Assistant returned no config-entry list.")
-        val existing = (0 until entries.size).map { entries.getJSONObject(it).getString("entry_id") }.toSet()
-        val registry = deviceRegistry(session)
-        domains.filterKeys { it in existing }.mapValues { (entryId, domain) -> association(registry, entryId, domain) }
+        return (0 until entries.size).map { entries.getJSONObject(it) }
     }
 
     private fun deviceRegistry(session: WebSocketSession): JSONArray =
         session.callCommand("config/device_registry/list").getJSONArray("result")
             ?: throw invalidResponse("Home Assistant returned no device registry.")
 
-    private fun association(registry: JSONArray, entryId: String, domain: String): HaEntryAssociation {
-        val device = (0 until registry.size)
-            .map { registry.getJSONObject(it) }
-            .firstOrNull { candidate ->
-                val configEntries = candidate.getJSONArray("config_entries")
-                    ?: throw invalidResponse("A Home Assistant device has no config entries.")
-                (0 until configEntries.size).any { configEntries.getString(it) == entryId }
-            }
+    // One Local Tuya hub entry holds every device, so its device is found by the identifier Local Tuya gives it.
+    private fun association(registry: JSONArray, deviceId: String, entryId: String, domain: String): HaEntryAssociation? {
+        val devices = (0 until registry.size).map { registry.getJSONObject(it) }
+        val device = if (domain == IntegrationKeys.LOCAL_TUYA) {
+            devices.firstOrNull { localTuyaDevice(it, deviceId) } ?: return null
+        } else devices.firstOrNull { entryId in registryEntries(it) }
         val registryId = device?.getString("id")
         val base = settingsStore.loadSettings().hassUrl.trimEnd('/')
         val openUrl = if (registryId != null) "$base/config/devices/device/$registryId"
@@ -103,16 +99,29 @@ class HomeAssistantClient(
         return HaEntryAssociation(entryId, registryId, openUrl)
     }
 
-    fun addIntegration(option: HaIntegrationOption, device: ActivatedDevice, report: NetworkReport, credentials: Credentials?): HaEntryAssociation {
+    private fun registryEntries(device: JSONObject): List<String> {
+        val entries = device.getJSONArray("config_entries") ?: throw invalidResponse("A Home Assistant device has no config entries.")
+        return (0 until entries.size).map { entries.getString(it) }
+    }
+
+    private fun localTuyaDevice(device: JSONObject, deviceId: String): Boolean {
+        val identifiers = device.getJSONArray("identifiers") ?: throw invalidResponse("A Home Assistant device has no identifiers.")
+        return (0 until identifiers.size).any { index ->
+            val identifier = identifiers.getJSONArray(index)
+            identifier.getString(0) == IntegrationKeys.LOCAL_TUYA && identifier.getString(1) == "local_$deviceId"
+        }
+    }
+
+    fun addIntegration(
+        option: HaIntegrationOption,
+        device: ActivatedDevice,
+        report: NetworkReport,
+        credentials: Credentials?,
+        dataPoints: List<TuyaDataPointSchema>
+    ): HaEntryAssociation {
         val entryId = when (option.key) {
-            "tuya_local" -> importDevice(
-                device.copy(ip = checkNotNull(report.ip) { "Tuya Local needs a LAN address" }),
-                report.onvif?.streams?.firstOrNull()?.url,
-                report.onvif?.streams?.getOrNull(1)?.url
-            ).entryId.also { entryId ->
-                // Tuya Local ships its camera entities disabled.
-                openVerifiedSession().use { session -> enableCameraEntities(session, setOf(entryId)) }
-            }
+            IntegrationKeys.TUYA_LOCAL -> addTuyaLocal(device, checkNotNull(report.ip) { "Tuya Local needs a LAN address" })
+            IntegrationKeys.LOCAL_TUYA -> addLocalTuya(device, checkNotNull(report.ip) { "Local Tuya needs a LAN address" }, dataPoints)
             "onvif" -> {
                 val service = checkNotNull(report.onvif) { "No ONVIF service probe result is available" }
                 val uri = java.net.URI(service.serviceUrl)
@@ -135,7 +144,7 @@ class HomeAssistantClient(
                 createCamera(title, stream.url, used.username, used.password)
             } else throw HomeAssistantException(HomeAssistantError.INVALID_FORMAT, "No explicit setup adapter for ${option.key}")
         }
-        return entryAssociation(entryId, checkNotNull(option.handler))
+        return entryAssociation(device.deviceId, entryId, checkNotNull(option.handler))
     }
 
     fun testConnection(): Boolean {
@@ -146,52 +155,8 @@ class HomeAssistantClient(
         }
     }
 
-    fun importDevice(
-        device: ActivatedDevice,
-        mainStreamUrl: String? = null,
-        subStreamUrl: String? = null
-    ): ImportResult {
+    private fun addTuyaLocal(device: ActivatedDevice, host: String): String = withVerifiedSession { session ->
         validateDevice(device)
-        val reconnectDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RECONNECT_WINDOW_SECONDS)
-        while (true) {
-            val session = try {
-                openVerifiedSession()
-            } catch (exception: HomeAssistantException) {
-                if (exception.error != HomeAssistantError.CONNECTION_FAILED ||
-                    System.nanoTime() >= reconnectDeadline
-                ) {
-                    throw exception
-                }
-                try {
-                    Thread.sleep(RECONNECT_DELAY_MILLIS)
-                } catch (interrupted: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                    throw HomeAssistantException(
-                        HomeAssistantError.INTERRUPTED,
-                        "Home Assistant reconnection was interrupted."
-                    )
-                }
-                continue
-            }
-            session.use {
-                return try {
-                    val outcome = sendImport(session, device, mainStreamUrl, subStreamUrl)
-                    awaitLoadedEntry(session, device, outcome)
-                } catch (exception: HomeAssistantException) {
-                    if (exception.error != HomeAssistantError.UNKNOWN_COMMAND) throw exception
-                    // Stock tuya-local does not register tuya_local/import_device; drive its standard REST config flow.
-                    importViaConfigFlow(session, device)
-                }
-            }
-        }
-    }
-
-    private fun importViaConfigFlow(session: WebSocketSession, device: ActivatedDevice): ImportResult {
-        val host = device.ip?.trim()?.takeIf { it.isNotEmpty() }
-            ?: throw HomeAssistantException(
-                HomeAssistantError.DISCOVERY_FAILED,
-                "Could not find the device on the local network. Check that it is powered on and on the same Wi-Fi."
-            )
         val protocolVersion = device.protocolVersion?.trim()
             ?.takeIf { HomeAssistantProtocol.isSupportedProtocolVersion(it) }
             ?: "auto"
@@ -199,7 +164,7 @@ class HomeAssistantClient(
         if (existingId != null) {
             updateTuyaLocalOptions(existingId, host, device.localKey, protocolVersion)
             session.callCommand("config_entries/update", mapOf("entry_id" to existingId, "title" to device.name))
-            return awaitLoadedEntry(session, device, ImportOutcome.UPDATED)
+            return@withVerifiedSession awaitLoadedEntry(session, device)
         }
         var step = postFlow("/api/config/config_entries/flow", mapOf("handler" to "tuya_local"))
         val flowId = step.getString("flow_id")
@@ -256,7 +221,111 @@ class HomeAssistantClient(
         if (created.getString("type") != "create_entry") {
             throw flowFailure(created)
         }
-        return awaitLoadedEntry(session, device, ImportOutcome.ADDED)
+        awaitLoadedEntry(session, device)
+    }
+
+    /**
+     * Adds the device to a Local Tuya hub entry, creating a cloud-less hub when there is none, with one entity per
+     * data point. Local Tuya has no device profiles, so the entities come from the Tuya schema the app already has.
+     */
+    private fun addLocalTuya(device: ActivatedDevice, host: String, dataPoints: List<TuyaDataPointSchema>): String {
+        val entities = HomeAssistantProtocol.localTuyaEntities(dataPoints)
+        if (entities.isEmpty()) {
+            throw HomeAssistantException(HomeAssistantError.UNSUPPORTED_PROFILE, "None of this device's data points can become a Local Tuya entity.")
+        }
+        val hub = localTuyaHub()
+        var step = postFlow("/api/config/config_entries/options/flow", mapOf("handler" to hub))
+        val flowPath = "/api/config/config_entries/options/flow/" +
+            (step.getString("flow_id") ?: throw invalidResponse("Home Assistant returned no Local Tuya options flow ID."))
+        requireMenu(step, "init")
+        step = postFlow(flowPath, mapOf("next_step_id" to "add_device"))
+        requireFlowStep(step, "add_device")
+        // "..." is Local Tuya's "Add Device Manually" choice, which takes the address and key instead of a scan result.
+        step = postFlow(flowPath, mapOf("selected_device" to "..."))
+        requireFlowStep(step, "configure_device")
+        step = postFlow(flowPath, HomeAssistantProtocol.localTuyaDevicePayload(device, host, dataPoints))
+        if (step.getString("step_id") == "configure_device") throw localTuyaConnectFailure(step, host)
+        requireMenu(step, "device_setup_method")
+        step = postFlow(flowPath, mapOf("next_step_id" to "pick_entity_type"))
+        for ((index, entity) in entities.withIndex()) {
+            requireFlowStep(step, "pick_entity_type")
+            // The "no more entities" box only appears once one entity exists, and defaults to finishing.
+            step = postFlow(flowPath, if (index == 0) mapOf("platform_to_add" to entity.platform)
+                else mapOf("platform_to_add" to entity.platform, "no_additional_entities" to false))
+            requireFlowStep(step, "configure_entity")
+            step = postFlow(flowPath, entity.fields)
+            // Local Tuya saves the device by itself once every data point it found has an entity.
+            if (step.getString("type") == "create_entry") break
+        }
+        if (step.getString("type") != "create_entry") {
+            requireFlowStep(step, "pick_entity_type")
+            step = postFlow(flowPath, mapOf("platform_to_add" to entities.last().platform, "no_additional_entities" to true))
+            if (step.getString("type") != "create_entry") throw flowFailure(step)
+        }
+        withVerifiedSession { session -> awaitLocalTuyaDevice(session, device.deviceId) }
+        return hub
+    }
+
+    private fun localTuyaHub(): String {
+        val existing = withVerifiedSession { session ->
+            configEntries(session).filter { it.getString("domain") == IntegrationKeys.LOCAL_TUYA }.map { it.getString("entry_id") }
+        }
+        if (existing.isNotEmpty()) return existing.first()
+        var step = postFlow("/api/config/config_entries/flow", mapOf("handler" to IntegrationKeys.LOCAL_TUYA))
+        val flowPath = "/api/config/config_entries/flow/" +
+            (step.getString("flow_id") ?: throw invalidResponse("Home Assistant returned no Local Tuya flow ID."))
+        requireFlowStep(step, "user")
+        step = postFlow(flowPath, mapOf("region" to "eu", "username" to IntegrationKeys.LOCAL_TUYA, "no_cloud" to true))
+        if (step.getString("type") != "create_entry") throw flowFailure(step)
+        val entryId = step.getJSONObject("result")?.getString("entry_id")
+            ?: throw invalidResponse("Home Assistant returned no Local Tuya entry ID.")
+        withVerifiedSession { session -> awaitEntryLoaded(session, entryId) }
+        return entryId
+    }
+
+    private fun localTuyaConnectFailure(step: JSONObject, host: String): HomeAssistantException {
+        val message = when (step.getJSONObject("errors")?.getString("base")) {
+            "cannot_connect" -> "Local Tuya could not reach the device at $host."
+            "invalid_auth" -> "Local Tuya could not talk to the device at $host with its local key."
+            "empty_dps" -> "Local Tuya found no data points on the device at $host."
+            else -> return flowFailure(step)
+        }
+        return HomeAssistantException(HomeAssistantError.SERVER_ERROR, message)
+    }
+
+    // The hub entry reloads after the options flow saves, and its devices register as that reload runs.
+    private fun awaitLocalTuyaDevice(session: WebSocketSession, deviceId: String) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(IMPORT_TIMEOUT_SECONDS)
+        while (System.nanoTime() < deadline) {
+            val registry = deviceRegistry(session)
+            if ((0 until registry.size).any { localTuyaDevice(registry.getJSONObject(it), deviceId) }) return
+            try {
+                Thread.sleep(POLL_INTERVAL_MILLIS)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw HomeAssistantException(HomeAssistantError.INTERRUPTED, "Local Tuya device poll was interrupted.")
+            }
+        }
+        throw HomeAssistantException(HomeAssistantError.ENTRY_NOT_LOADED, "Timed out waiting for Local Tuya to load the device.")
+    }
+
+    /** Takes the device out of its Local Tuya hub; the hub and its other devices stay. */
+    fun removeLocalTuyaDevice(deviceId: String) = withVerifiedSession { session -> detachLocalTuyaDevice(session, deviceId) }
+
+    // A device already gone from every hub has nothing left to detach.
+    private fun detachLocalTuyaDevice(session: WebSocketSession, deviceId: String) {
+        val hubs = configEntries(session).filter { it.getString("domain") == IntegrationKeys.LOCAL_TUYA }.map { it.getString("entry_id") }.toSet()
+        val registry = deviceRegistry(session)
+        for (index in 0 until registry.size) {
+            val device = registry.getJSONObject(index)
+            if (!localTuyaDevice(device, deviceId)) continue
+            for (entryId in registryEntries(device).filter { it in hubs }) {
+                session.callCommand(
+                    "config/device_registry/remove_config_entry",
+                    mapOf("device_id" to device.getString("id"), "config_entry_id" to entryId)
+                )
+            }
+        }
     }
 
     // Entry summaries from config_entries/get carry no unique_id, so match on the device registry identifier
@@ -355,42 +424,55 @@ class HomeAssistantClient(
             }
             val legacyIds = mutableListOf<String>()
             val existingIds = mutableSetOf<String>()
+            val hubs = mutableSetOf<String>()
             for (index in 0 until entries.size) {
                 val entry = entries.getJSONObject(index)
                 val id = checkNotNull(entry.getString("entry_id")) { "A config entry has no entry ID" }
                 existingIds += id
+                if (entry.getString("domain") == IntegrationKeys.LOCAL_TUYA) hubs += id
                 if (entry.getString("domain") == "generic" && entry.getString("title") in legacyCameraTitles) legacyIds += id
             }
-            (entryIds + linkedIds + legacyIds).distinct().filter { it in existingIds }
+            // A Local Tuya hub entry holds other devices too, so only this device is taken out of it.
+            detachLocalTuyaDevice(session, deviceId)
+            (entryIds + linkedIds + legacyIds).distinct().filter { it in existingIds && it !in hubs }
         }
         targets.forEach(::removeIntegrationEntry)
         return targets.size
     }
 
-    /** Sets each config entry's title, and the same name on every Home Assistant device that entry created. */
-    fun renameEntries(titles: Map<String, String>) = withVerifiedSession { session ->
-        val registry = session.callCommand("config/device_registry/list").getJSONArray("result")
-            ?: throw invalidResponse("Home Assistant returned no device registry.")
-        titles.forEach { (entryId, title) ->
-            session.callCommand("config_entries/update", mapOf("entry_id" to entryId, "title" to title))
-            for (index in 0 until registry.size) {
-                val device = registry.getJSONObject(index)
-                val configEntries = device.getJSONArray("config_entries")
-                    ?: throw invalidResponse("A Home Assistant device has no config_entries list.")
-                if ((0 until configEntries.size).none { configEntries.getString(it) == entryId }) continue
+    /**
+     * Sets each integration's entry title, and the same name on every Home Assistant device that entry created. A
+     * Local Tuya hub is shared, so only this device's name changes there.
+     */
+    fun renameEntries(deviceId: String, titles: Map<HaIntegrationOption, String>) = withVerifiedSession { session ->
+        val registry = deviceRegistry(session)
+        val devices = (0 until registry.size).map { registry.getJSONObject(it) }
+        titles.forEach { (option, title) ->
+            val entryId = checkNotNull(option.entryId) { "${option.key} has no entry to rename" }
+            val renamed = if (option.key == IntegrationKeys.LOCAL_TUYA) devices.filter { localTuyaDevice(it, deviceId) }
+            else {
+                session.callCommand("config_entries/update", mapOf("entry_id" to entryId, "title" to title))
+                devices.filter { entryId in registryEntries(it) }
+            }
+            renamed.forEach { device ->
                 session.callCommand("config/device_registry/update", mapOf("device_id" to device.getString("id"), "name_by_user" to title))
             }
         }
     }
 
     /** Swaps the old name's slug for the new one at the start of every entity ID these entries own. */
-    fun renameEntityIds(entryIds: Set<String>, oldName: String, newName: String) {
+    fun renameEntityIds(deviceId: String, options: Set<HaIntegrationOption>, oldName: String, newName: String) {
         val oldSlug = HomeAssistantProtocol.entitySlug(oldName)
         val newSlug = HomeAssistantProtocol.entitySlug(newName)
         if (newSlug.isEmpty()) {
             throw HomeAssistantException(HomeAssistantError.INVALID_FORMAT, "\"$newName\" has no letters or digits an entity ID can use.")
         }
+        val entryIds = options.map { checkNotNull(it.entryId) { "${it.key} has no entry" } }.toSet()
         withVerifiedSession { session ->
+            // In a shared Local Tuya hub only the entities of this device's registry entry are its own.
+            val devices = deviceRegistry(session)
+            val localTuyaDevices = (0 until devices.size).map { devices.getJSONObject(it) }
+                .filter { localTuyaDevice(it, deviceId) }.map { it.getString("id") }.toSet()
             val registry = session.callCommand("config/entity_registry/list").getJSONArray("result")
                 ?: throw invalidResponse("Home Assistant returned no entity registry.")
             val entities = (0 until registry.size).map { registry.getJSONObject(it) }
@@ -400,6 +482,7 @@ class HomeAssistantClient(
             for (entity in entities) {
                 val entryId = entity.getString("config_entry_id") ?: continue
                 if (entryId !in entryIds) continue
+                if (entity.getString("platform") == IntegrationKeys.LOCAL_TUYA && entity.getString("device_id") !in localTuyaDevices) continue
                 val entityId = entity.getString("entity_id")
                 val domain = entityId.substringBefore('.')
                 val objectId = entityId.substringAfter('.')
@@ -636,13 +719,17 @@ class HomeAssistantClient(
         }
     }
 
+    private fun requireMenu(response: JSONObject, stepId: String) {
+        if (response.getString("type") != "menu" || response.getString("step_id") != stepId) throw flowFailure(response)
+    }
+
     private fun flowFailure(response: JSONObject): HomeAssistantException {
         val detail = response.getJSONObject("errors")?.toJSONString()
             ?: response.getString("reason")
-            ?: response.getString("type")
+            ?: "${response.getString("type")} ${response.getString("step_id")}"
         return HomeAssistantException(
             HomeAssistantError.SERVER_ERROR,
-            "Home Assistant rejected the camera configuration: $detail"
+            "Home Assistant rejected the setup: $detail"
         )
     }
 
@@ -729,7 +816,7 @@ class HomeAssistantClient(
         }
         throw HomeAssistantException(
             HomeAssistantError.ENTRY_NOT_LOADED,
-            "Timed out waiting for the camera config entry to finish loading."
+            "Timed out waiting for the Home Assistant config entry to finish loading."
         )
     }
 
@@ -805,31 +892,7 @@ class HomeAssistantClient(
         }
     }
 
-    private fun sendImport(
-        session: WebSocketSession,
-        device: ActivatedDevice,
-        mainStreamUrl: String?,
-        subStreamUrl: String?
-    ): ImportOutcome {
-        val id = session.nextCommandId()
-        session.send(HomeAssistantProtocol.importPayload(device, id, mainStreamUrl, subStreamUrl))
-        val response = session.awaitResult(id, IMPORT_COMMAND_TIMEOUT_SECONDS)
-        val result = response.getJSONObject("result")
-            ?: throw invalidResponse("Home Assistant returned no import result.")
-        result.getString("error")?.let { throw serverError(it) }
-        return when (result.getString("outcome")) {
-            "added" -> ImportOutcome.ADDED
-            "updated" -> ImportOutcome.UPDATED
-            "already_present" -> ImportOutcome.ALREADY_PRESENT
-            else -> throw invalidResponse("Home Assistant returned an unknown import outcome.")
-        }
-    }
-
-    private fun awaitLoadedEntry(
-        session: WebSocketSession,
-        device: ActivatedDevice,
-        outcome: ImportOutcome
-    ): ImportResult {
+    private fun awaitLoadedEntry(session: WebSocketSession, device: ActivatedDevice): String {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(IMPORT_TIMEOUT_SECONDS)
         while (System.nanoTime() < deadline) {
             val response = session.callCommand("config_entries/get")
@@ -845,9 +908,8 @@ class HomeAssistantClient(
                     entry.getString("title") == device.name
                 }
                 if (matches && entry.getString("state") == "loaded") {
-                    val entryId = entry.getString("entry_id")
+                    return entry.getString("entry_id")
                         ?: throw invalidResponse("The loaded Tuya Local entry has no entry ID.")
-                    return ImportResult(outcome, entryId, loaded = true)
                 }
             }
             try {
@@ -872,7 +934,7 @@ class HomeAssistantClient(
         ) {
             throw HomeAssistantException(
                 HomeAssistantError.INVALID_FORMAT,
-                "Device ID, local key, name, and product ID are required for import."
+                "Device ID, local key, name, and product ID are required for Tuya Local."
             )
         }
     }
@@ -975,7 +1037,6 @@ class HomeAssistantClient(
 
     private companion object {
         const val MESSAGE_TIMEOUT_SECONDS = 15L
-        const val IMPORT_COMMAND_TIMEOUT_SECONDS = 90L
         const val IMPORT_TIMEOUT_SECONDS = 60L
         const val RECONNECT_WINDOW_SECONDS = 15L
         const val RECONNECT_DELAY_MILLIS = 500L
@@ -1020,32 +1081,6 @@ internal object HomeAssistantProtocol {
         return converted + "/api/websocket"
     }
 
-    fun importPayload(
-        device: ActivatedDevice,
-        id: Long,
-        mainStreamUrl: String? = null,
-        subStreamUrl: String? = null
-    ): Map<String, Any?> {
-        val protocolVersion = device.protocolVersion?.trim()
-            ?.takeIf { SUPPORTED_PROTOCOL_VERSION.matches(it) }
-            ?: "auto"
-        val payload = linkedMapOf<String, Any?>(
-            "id" to id,
-            "type" to "tuya_local/import_device",
-            "import_version" to 1,
-            "device_id" to device.deviceId,
-            "local_key" to device.localKey,
-            "name" to device.name,
-            "product_id" to device.productId,
-            "protocol_version" to protocolVersion
-        )
-        device.category?.trim()?.takeIf { it.isNotEmpty() }?.let { payload["category"] = it }
-        device.ip?.trim()?.takeIf(::isRfc1918Address)?.let { payload["ip"] = it }
-        mainStreamUrl?.trim()?.takeIf { it.isNotEmpty() }?.let { payload["main_stream_url"] = it }
-        subStreamUrl?.trim()?.takeIf { it.isNotEmpty() }?.let { payload["sub_stream_url"] = it }
-        return payload
-    }
-
     fun isRfc1918Address(value: String): Boolean {
         val parts = value.split('.')
         if (parts.size != 4) return false
@@ -1062,6 +1097,55 @@ internal object HomeAssistantProtocol {
 
     fun isSupportedProtocolVersion(value: String): Boolean =
         SUPPORTED_PROTOCOL_VERSION.matches(value)
+
+    // Local Tuya tries each version in turn for "auto", and gives up on the first one that errors.
+    private val LOCAL_TUYA_PROTOCOLS = setOf("3.1", "3.2", "3.3", "3.4", "3.5")
+
+    /** Every data point is listed by hand, so the ones the device has not reported yet can still get an entity. */
+    fun localTuyaDevicePayload(device: ActivatedDevice, host: String, dataPoints: List<TuyaDataPointSchema>): Map<String, Any?> = linkedMapOf(
+        "friendly_name" to device.name,
+        "host" to host,
+        "device_id" to device.deviceId,
+        "local_key" to device.localKey,
+        "protocol_version" to (device.protocolVersion?.takeIf { it in LOCAL_TUYA_PROTOCOLS } ?: "auto"),
+        "enable_debug" to false,
+        "manual_dps_strings" to dataPoints.joinToString(",") { it.id }
+    )
+
+    class LocalTuyaEntity(val platform: String, val fields: Map<String, Any?>)
+
+    /** Controls become switches, selects and numbers; read-only values become sensors. Raw data points get none. */
+    fun localTuyaEntities(dataPoints: List<TuyaDataPointSchema>): List<LocalTuyaEntity> = dataPoints.mapNotNull { dp ->
+        val base = linkedMapOf<String, Any?>("id" to dp.id, "friendly_name" to dataPointName(dp))
+        val property = JSON.parseObject(dp.propertyJson)
+        val settable = mapOf("restore_on_reconnect" to false, "is_passive_entity" to false)
+        if (dp.type != "obj") return@mapNotNull null
+        when (dp.schemaType) {
+            "bool" -> if (dp.writable) LocalTuyaEntity("switch", base + settable) else LocalTuyaEntity("binary_sensor", base)
+            "enum" -> if (dp.writable) {
+                val range = checkNotNull(property.getJSONArray("range")) { "Enum DP ${dp.id} has no range" }
+                LocalTuyaEntity("select", base + settable + ("select_options" to (0 until range.size).associate { range.getString(it) to range.getString(it) }))
+            } else LocalTuyaEntity("sensor", base)
+            "value" -> {
+                val measure = buildMap<String, Any?> {
+                    property.getString("unit")?.takeIf { it.isNotBlank() }?.let { put("unit_of_measurement", it) }
+                    // Tuya sends value data points as integers scaled by 10^scale.
+                    property.getInteger("scale")?.takeIf { it > 0 }?.let { put("scaling", Math.pow(10.0, -it.toDouble())) }
+                }
+                if (dp.writable) LocalTuyaEntity("number", base + settable + measure + mapOf(
+                    "min_value" to checkNotNull(property.getDouble("min")) { "Value DP ${dp.id} has no min" },
+                    "max_value" to checkNotNull(property.getDouble("max")) { "Value DP ${dp.id} has no max" },
+                    "step_size" to (property.getDouble("step") ?: 1.0)
+                )) else LocalTuyaEntity("sensor", base + measure)
+            }
+            "string", "bitmap" -> LocalTuyaEntity("sensor", base)
+            else -> null
+        }
+    }
+
+    // The schema's name is often just the code; a code like "basic_flip" reads better as "Basic flip".
+    private fun dataPointName(dp: TuyaDataPointSchema): String =
+        if (dp.name.isNotBlank() && dp.name != dp.code) dp.name else dp.code.replace('_', ' ').replaceFirstChar { it.uppercase() }
 
     fun onvifConfigurePayload(
         name: String,
@@ -1129,37 +1213,10 @@ internal object HomeAssistantProtocol {
     private val SUPPORTED_PROTOCOL_VERSION = Regex("3\\.\\d+")
 }
 
-internal fun serverError(code: String?): HomeAssistantException {
-    val error = when (code) {
-        "unknown_command" -> HomeAssistantError.UNKNOWN_COMMAND
-        "unauthorized", "auth_invalid" -> HomeAssistantError.UNAUTHORIZED
-        "invalid_format" -> HomeAssistantError.INVALID_FORMAT
-        "handshake_failed" -> HomeAssistantError.HANDSHAKE_FAILED
-        "unsupported_profile" -> HomeAssistantError.UNSUPPORTED_PROFILE
-        "unsupported_protocol" -> HomeAssistantError.UNSUPPORTED_PROTOCOL
-        "discovery_failed" -> HomeAssistantError.DISCOVERY_FAILED
-        else -> HomeAssistantError.SERVER_ERROR
-    }
-    val message = when (error) {
-        HomeAssistantError.UNKNOWN_COMMAND ->
-            "The Home Assistant Tuya Local integration does not support device import."
-        HomeAssistantError.UNAUTHORIZED ->
-            "Home Assistant rejected the import request as unauthorized."
-        HomeAssistantError.INVALID_FORMAT ->
-            "Home Assistant rejected the device import format."
-        HomeAssistantError.HANDSHAKE_FAILED ->
-            "The local device handshake failed during import."
-        HomeAssistantError.UNSUPPORTED_PROFILE ->
-            "The device profile is not supported by Tuya Local."
-        HomeAssistantError.UNSUPPORTED_PROTOCOL ->
-            "The device protocol is not supported by Tuya Local."
-        HomeAssistantError.DISCOVERY_FAILED ->
-            "Home Assistant could not find the device on the local network. " +
-                "Check that it is powered on and connected to the same LAN."
-        else ->
-            "Home Assistant could not import the device."
-    }
-    return HomeAssistantException(error, message)
+internal fun serverError(code: String?): HomeAssistantException = when (code) {
+    "unauthorized", "auth_invalid" -> HomeAssistantException(HomeAssistantError.UNAUTHORIZED, "Home Assistant rejected the request as unauthorized.")
+    "invalid_format" -> HomeAssistantException(HomeAssistantError.INVALID_FORMAT, "Home Assistant rejected the request format.")
+    else -> HomeAssistantException(HomeAssistantError.SERVER_ERROR, "Home Assistant could not complete the request (${code ?: "no error code"}).")
 }
 
 private fun invalidResponse(message: String) = HomeAssistantException(

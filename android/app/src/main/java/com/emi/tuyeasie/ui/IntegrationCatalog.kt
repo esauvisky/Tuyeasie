@@ -14,7 +14,10 @@ fun buildIntegrationCatalog(capabilities: DeviceCapabilities, report: NetworkRep
     val oldByKey = previous.associateBy { it.key }
     val candidates = linkedMapOf<String, Pair<String, String>>()
     if (report != null) {
-        if (capabilities.supportsTuyaLocal) candidates[IntegrationKeys.TUYA_LOCAL] = "Tuya Local" to "tuya_local"
+        if (capabilities.supportsTuyaLocal) {
+            candidates[IntegrationKeys.TUYA_LOCAL] = "Tuya Local" to IntegrationKeys.TUYA_LOCAL
+            candidates[IntegrationKeys.LOCAL_TUYA] = "Local Tuya" to IntegrationKeys.LOCAL_TUYA
+        }
         if (report.onvif != null) candidates[IntegrationKeys.ONVIF] = "ONVIF" to "onvif"
         report.onvif?.streams.orEmpty().ifEmpty { report.portScanStreams }.indices.forEach { index ->
             candidates[haOptionKeyForStream(index)] = streamLabel(index) to "generic"
@@ -42,14 +45,14 @@ private fun streamLabel(index: Int) = when (index) {
 }
 
 /** The Home Assistant entry title of each added integration for a device with this name; extra streams keep their suffix. */
-fun entryTitles(name: String, options: List<HaIntegrationOption>): Map<String, String> =
+fun entryTitles(name: String, options: List<HaIntegrationOption>): Map<HaIntegrationOption, String> =
     options.filter { it.entryId != null }.associate { option ->
         val title = when {
             option.key == "generic:1" -> "$name Substream"
             option.key.startsWith("generic:") -> "$name Stream ${option.key.substringAfter(':').toInt() + 1}"
             else -> name
         }
-        checkNotNull(option.entryId) to title
+        option to title
     }
 
 fun haOptionKeyForStream(index: Int) = if (index == 0) IntegrationKeys.GENERIC else "generic:$index"
