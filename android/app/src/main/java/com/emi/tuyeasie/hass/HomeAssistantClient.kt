@@ -166,6 +166,7 @@ class HomeAssistantClient(
             session.callCommand("config_entries/update", mapOf("entry_id" to existingId, "title" to device.name))
             return@withVerifiedSession awaitLoadedEntry(session, device)
         }
+        dropTuyaLocalDiscoveries(session, device.deviceId, host)
         var step = postFlow("/api/config/config_entries/flow", mapOf("handler" to "tuya_local"))
         val flowId = step.getString("flow_id")
             ?: throw invalidResponse("Home Assistant returned no Tuya Local flow ID.")
@@ -325,6 +326,25 @@ class HomeAssistantClient(
                     mapOf("device_id" to device.getString("id"), "config_entry_id" to entryId)
                 )
             }
+        }
+    }
+
+    /**
+     * Tuya Local's LAN scanner opens a "Discovered" flow for every device ID it hears. One for this device holds its
+     * unique ID, so a new flow for it aborts with already_in_progress. Ones at the same address are earlier pairings of
+     * this device, whose IDs no longer exist. Both are closed before adding.
+     */
+    private fun dropTuyaLocalDiscoveries(session: WebSocketSession, deviceId: String, host: String) {
+        val flows = session.callCommand("config_entries/flow/progress").getJSONArray("result")
+            ?: throw invalidResponse("Home Assistant returned no flow list.")
+        for (index in 0 until flows.size) {
+            val flow = flows.getJSONObject(index)
+            if (flow.getString("handler") != IntegrationKeys.TUYA_LOCAL) continue
+            val context = flow.getJSONObject("context") ?: throw invalidResponse("A Home Assistant flow has no context.")
+            if (context.getString("source") != "integration_discovery") continue
+            val sameDevice = context.getString("unique_id") == deviceId
+            val sameHost = context.getJSONObject("title_placeholders")?.getString("name") == host
+            if (sameDevice || sameHost) httpRequest("DELETE", "/api/config/config_entries/flow/${flow.getString("flow_id")}", null)
         }
     }
 
