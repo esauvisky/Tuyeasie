@@ -4,7 +4,7 @@ Tuya will sell you a smart plug, then ask for a developer account, a cloud proje
 
 It is an Android app that pairs a Tuya device from your phone and adds it to Home Assistant with local control. No Smart Life account, no IoT portal, no `tinytuya wizard`.
 
-<!-- VIDEO: paste the GitHub user-attachments link on the next line -->
+https://github.com/user-attachments/assets/5bbd10ef-05ce-4e07-be31-63673f43af4d
 
 ## Quick start
 
