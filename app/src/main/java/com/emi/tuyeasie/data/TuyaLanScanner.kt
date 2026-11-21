@@ -1,12 +1,16 @@
 package com.emi.tuyeasie.data
 
 import com.alibaba.fastjson.JSON
+import com.alibaba.fastjson.JSONException
 import java.net.DatagramPacket
+import java.net.BindException
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.SocketTimeoutException
 import java.nio.ByteBuffer
 import java.security.MessageDigest
+import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -23,12 +27,13 @@ object TuyaLanScanner {
     fun findDevice(deviceId: String, timeoutMillis: Int = 8_000): LanDiscoveryResult? {
         val sockets = listOf(6666, 6667, 7000).mapNotNull { port ->
             try {
-                DatagramSocket(port).apply {
+                DatagramSocket(null).apply {
                     reuseAddress = true
                     broadcast = true
                     soTimeout = 250
+                    bind(InetSocketAddress(port))
                 }
-            } catch (_: Exception) {
+            } catch (_: BindException) {
                 // Another listener on the phone may hold one of the UDP ports; scan the remaining ports.
                 null
             }
@@ -121,7 +126,7 @@ object TuyaLanScanner {
                 cipher.updateAAD(data, 4, 14)
                 val decrypted = try {
                     cipher.doFinal(ciphertextAndTag)
-                } catch (_: Exception) {
+                } catch (_: AEADBadTagException) {
                     return null
                 }
                 val withoutReturnCode = if (decrypted.size > 4 && decrypted[0] != '{'.code.toByte()) {
@@ -135,7 +140,7 @@ object TuyaLanScanner {
         }
         val json = try {
             JSON.parseObject(jsonText)
-        } catch (_: Exception) {
+        } catch (_: JSONException) {
             return null
         } ?: return null
         val gwId = json.getString("gwId") ?: return null

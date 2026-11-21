@@ -1,5 +1,7 @@
 # Android
-android/local.properties
+local.properties
+keystore.properties
+*.keystore
 **/.gradle/
 **/.kotlin/
 **/build/

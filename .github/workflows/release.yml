@@ -37,7 +37,7 @@ jobs:
         env:
           TUYA_APP_KEY: ${{ secrets.TUYA_APP_KEY }}
           TUYA_APP_SECRET: ${{ secrets.TUYA_APP_SECRET }}
-        run: printf 'appKey=%s\nappSecret=%s\n' "$TUYA_APP_KEY" "$TUYA_APP_SECRET" > android/local.properties
+        run: printf 'appKey=%s\nappSecret=%s\n' "$TUYA_APP_KEY" "$TUYA_APP_SECRET" > local.properties
 
       - name: Decode the release keystore
         env:
@@ -45,18 +45,16 @@ jobs:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        working-directory: android
         run: |
           printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > release.keystore
           printf 'storeFile=release.keystore\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
             "$ANDROID_KEYSTORE_PASSWORD" "$ANDROID_KEY_ALIAS" "$ANDROID_KEY_PASSWORD" > keystore.properties
 
       - name: Build the signed release APK
-        working-directory: android
         run: ./gradlew assembleRelease
 
       - name: Upload APK to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          files: android/app/build/outputs/apk/release/app-release.apk
+          files: app/build/outputs/apk/release/app-release.apk

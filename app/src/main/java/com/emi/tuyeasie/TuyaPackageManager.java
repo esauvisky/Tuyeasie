@@ -27,6 +27,7 @@ import android.content.res.XmlResourceParser;
 import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
 import android.os.Build;
+import android.os.Parcel;
 import android.os.UserHandle;
 import android.util.Log;
 
@@ -93,27 +94,63 @@ final class TuyaPackageManager extends PackageManager {
         digestLogged = true;
     }
 
+    private static boolean isOfficial(String packageName) {
+        return OFFICIAL_PACKAGE_NAME.equals(packageName);
+    }
+
     private String delegatePackageName(String packageName) {
-        return OFFICIAL_PACKAGE_NAME.equals(packageName) ? actualPackageName : packageName;
+        return isOfficial(packageName) ? actualPackageName : packageName;
     }
 
     private ComponentName delegateComponentName(ComponentName component) {
-        return OFFICIAL_PACKAGE_NAME.equals(component.getPackageName())
+        return isOfficial(component.getPackageName())
                 ? new ComponentName(actualPackageName, component.getClassName())
                 : component;
     }
 
-    private <T extends ComponentInfo> T withOfficialComponentPackage(T componentInfo) {
+    private VersionedPackage delegateVersionedPackage(VersionedPackage versionedPackage) {
+        return isOfficial(versionedPackage.getPackageName())
+                ? new VersionedPackage(actualPackageName, versionedPackage.getVersionCode())
+                : versionedPackage;
+    }
+
+    private static PackageInfo copyOf(PackageInfo packageInfo) {
+        Parcel parcel = Parcel.obtain();
+        try {
+            packageInfo.writeToParcel(parcel, 0);
+            parcel.setDataPosition(0);
+            return PackageInfo.CREATOR.createFromParcel(parcel);
+        } finally {
+            parcel.recycle();
+        }
+    }
+
+    private <T extends ComponentInfo> T withOfficialComponentPackage(String requestedPackage, T componentInfo) {
+        if (!isOfficial(requestedPackage)) {
+            return componentInfo;
+        }
         componentInfo.packageName = OFFICIAL_PACKAGE_NAME;
-        componentInfo.applicationInfo.packageName = OFFICIAL_PACKAGE_NAME;
-        componentInfo.applicationInfo.flags &= ~ApplicationInfo.FLAG_DEBUGGABLE;
+        componentInfo.applicationInfo = withOfficialApplicationInfo(requestedPackage, componentInfo.applicationInfo);
         return componentInfo;
     }
 
-    private PackageInfo withOfficialSignature(PackageInfo packageInfo) {
+    private ApplicationInfo withOfficialApplicationInfo(String requestedPackage, ApplicationInfo applicationInfo) {
+        if (!isOfficial(requestedPackage)) {
+            return applicationInfo;
+        }
+        ApplicationInfo copy = new ApplicationInfo(applicationInfo);
+        copy.packageName = OFFICIAL_PACKAGE_NAME;
+        copy.flags &= ~ApplicationInfo.FLAG_DEBUGGABLE;
+        return copy;
+    }
+
+    private PackageInfo withOfficialSignature(String requestedPackage, PackageInfo original) {
+        if (!isOfficial(requestedPackage)) {
+            return original;
+        }
+        PackageInfo packageInfo = copyOf(original);
         packageInfo.packageName = OFFICIAL_PACKAGE_NAME;
-        packageInfo.applicationInfo.packageName = OFFICIAL_PACKAGE_NAME;
-        packageInfo.applicationInfo.flags &= ~ApplicationInfo.FLAG_DEBUGGABLE;
+        packageInfo.applicationInfo = withOfficialApplicationInfo(requestedPackage, packageInfo.applicationInfo);
         packageInfo.signatures = new Signature[]{officialSignature};
         Log.d(LOG_TAG, "packageName=" + packageInfo.packageName
                 + " signatures.length=" + packageInfo.signatures.length);
@@ -143,30 +180,26 @@ final class TuyaPackageManager extends PackageManager {
 
     @Override
     public PackageInfo getPackageInfo(String packageName, int flags) throws NameNotFoundException {
-        return withOfficialSignature(delegate.getPackageInfo(delegatePackageName(packageName), flags));
+        return withOfficialSignature(packageName, delegate.getPackageInfo(delegatePackageName(packageName), flags));
     }
 
     @TargetApi(Build.VERSION_CODES.TIRAMISU)
     @Override
     public PackageInfo getPackageInfo(String packageName, PackageInfoFlags flags) throws NameNotFoundException {
-        return withOfficialSignature(delegate.getPackageInfo(delegatePackageName(packageName), flags));
+        return withOfficialSignature(packageName, delegate.getPackageInfo(delegatePackageName(packageName), flags));
     }
 
     @Override
     public PackageInfo getPackageInfo(VersionedPackage versionedPackage, int flags) throws NameNotFoundException {
-        VersionedPackage delegatePackage = OFFICIAL_PACKAGE_NAME.equals(versionedPackage.getPackageName())
-                ? new VersionedPackage(actualPackageName, versionedPackage.getVersionCode())
-                : versionedPackage;
-        return withOfficialSignature(delegate.getPackageInfo(delegatePackage, flags));
+        return withOfficialSignature(versionedPackage.getPackageName(),
+                delegate.getPackageInfo(delegateVersionedPackage(versionedPackage), flags));
     }
 
     @TargetApi(Build.VERSION_CODES.TIRAMISU)
     @Override
     public PackageInfo getPackageInfo(VersionedPackage versionedPackage, PackageInfoFlags flags) throws NameNotFoundException {
-        VersionedPackage delegatePackage = OFFICIAL_PACKAGE_NAME.equals(versionedPackage.getPackageName())
-                ? new VersionedPackage(actualPackageName, versionedPackage.getVersionCode())
-                : versionedPackage;
-        return withOfficialSignature(delegate.getPackageInfo(delegatePackage, flags));
+        return withOfficialSignature(versionedPackage.getPackageName(),
+                delegate.getPackageInfo(delegateVersionedPackage(versionedPackage), flags));
     }
 
     @Override
@@ -181,27 +214,27 @@ final class TuyaPackageManager extends PackageManager {
 
     @Override
     public Intent getLaunchIntentForPackage(String packageName) {
-        return delegate.getLaunchIntentForPackage(packageName);
+        return delegate.getLaunchIntentForPackage(delegatePackageName(packageName));
     }
 
     @Override
     public Intent getLeanbackLaunchIntentForPackage(String packageName) {
-        return delegate.getLeanbackLaunchIntentForPackage(packageName);
+        return delegate.getLeanbackLaunchIntentForPackage(delegatePackageName(packageName));
     }
 
     @Override
     public int[] getPackageGids(String packageName) throws NameNotFoundException {
-        return delegate.getPackageGids(packageName);
+        return delegate.getPackageGids(delegatePackageName(packageName));
     }
 
     @Override
     public int[] getPackageGids(String packageName, int flags) throws NameNotFoundException {
-        return delegate.getPackageGids(packageName, flags);
+        return delegate.getPackageGids(delegatePackageName(packageName), flags);
     }
 
     @Override
     public int getPackageUid(String packageName, int flags) throws NameNotFoundException {
-        return delegate.getPackageUid(packageName, flags);
+        return delegate.getPackageUid(delegatePackageName(packageName), flags);
     }
 
     @Override
@@ -226,63 +259,57 @@ final class TuyaPackageManager extends PackageManager {
 
     @Override
     public ApplicationInfo getApplicationInfo(String packageName, int flags) throws NameNotFoundException {
-        ApplicationInfo applicationInfo = delegate.getApplicationInfo(delegatePackageName(packageName), flags);
-        applicationInfo.packageName = OFFICIAL_PACKAGE_NAME;
-        applicationInfo.flags &= ~ApplicationInfo.FLAG_DEBUGGABLE;
-        return applicationInfo;
+        return withOfficialApplicationInfo(packageName, delegate.getApplicationInfo(delegatePackageName(packageName), flags));
     }
 
     @TargetApi(Build.VERSION_CODES.TIRAMISU)
     @Override
     public ApplicationInfo getApplicationInfo(String packageName, ApplicationInfoFlags flags) throws NameNotFoundException {
-        ApplicationInfo applicationInfo = delegate.getApplicationInfo(delegatePackageName(packageName), flags);
-        applicationInfo.packageName = OFFICIAL_PACKAGE_NAME;
-        applicationInfo.flags &= ~ApplicationInfo.FLAG_DEBUGGABLE;
-        return applicationInfo;
+        return withOfficialApplicationInfo(packageName, delegate.getApplicationInfo(delegatePackageName(packageName), flags));
     }
 
     @Override
     public ActivityInfo getActivityInfo(ComponentName component, int flags) throws NameNotFoundException {
-        return withOfficialComponentPackage(delegate.getActivityInfo(delegateComponentName(component), flags));
+        return withOfficialComponentPackage(component.getPackageName(), delegate.getActivityInfo(delegateComponentName(component), flags));
     }
 
     @TargetApi(Build.VERSION_CODES.TIRAMISU)
     @Override
     public ActivityInfo getActivityInfo(ComponentName component, ComponentInfoFlags flags) throws NameNotFoundException {
-        return withOfficialComponentPackage(delegate.getActivityInfo(delegateComponentName(component), flags));
+        return withOfficialComponentPackage(component.getPackageName(), delegate.getActivityInfo(delegateComponentName(component), flags));
     }
 
     @Override
     public ActivityInfo getReceiverInfo(ComponentName component, int flags) throws NameNotFoundException {
-        return withOfficialComponentPackage(delegate.getReceiverInfo(delegateComponentName(component), flags));
+        return withOfficialComponentPackage(component.getPackageName(), delegate.getReceiverInfo(delegateComponentName(component), flags));
     }
 
     @TargetApi(Build.VERSION_CODES.TIRAMISU)
     @Override
     public ActivityInfo getReceiverInfo(ComponentName component, ComponentInfoFlags flags) throws NameNotFoundException {
-        return withOfficialComponentPackage(delegate.getReceiverInfo(delegateComponentName(component), flags));
+        return withOfficialComponentPackage(component.getPackageName(), delegate.getReceiverInfo(delegateComponentName(component), flags));
     }
 
     @Override
     public ServiceInfo getServiceInfo(ComponentName component, int flags) throws NameNotFoundException {
-        return withOfficialComponentPackage(delegate.getServiceInfo(delegateComponentName(component), flags));
+        return withOfficialComponentPackage(component.getPackageName(), delegate.getServiceInfo(delegateComponentName(component), flags));
     }
 
     @TargetApi(Build.VERSION_CODES.TIRAMISU)
     @Override
     public ServiceInfo getServiceInfo(ComponentName component, ComponentInfoFlags flags) throws NameNotFoundException {
-        return withOfficialComponentPackage(delegate.getServiceInfo(delegateComponentName(component), flags));
+        return withOfficialComponentPackage(component.getPackageName(), delegate.getServiceInfo(delegateComponentName(component), flags));
     }
 
     @Override
     public ProviderInfo getProviderInfo(ComponentName component, int flags) throws NameNotFoundException {
-        return withOfficialComponentPackage(delegate.getProviderInfo(delegateComponentName(component), flags));
+        return withOfficialComponentPackage(component.getPackageName(), delegate.getProviderInfo(delegateComponentName(component), flags));
     }
 
     @TargetApi(Build.VERSION_CODES.TIRAMISU)
     @Override
     public ProviderInfo getProviderInfo(ComponentName component, ComponentInfoFlags flags) throws NameNotFoundException {
-        return withOfficialComponentPackage(delegate.getProviderInfo(delegateComponentName(component), flags));
+        return withOfficialComponentPackage(component.getPackageName(), delegate.getProviderInfo(delegateComponentName(component), flags));
     }
 
     @Override
@@ -297,12 +324,12 @@ final class TuyaPackageManager extends PackageManager {
 
     @Override
     public int checkPermission(String permissionName, String packageName) {
-        return delegate.checkPermission(permissionName, packageName);
+        return delegate.checkPermission(permissionName, delegatePackageName(packageName));
     }
 
     @Override
     public boolean isPermissionRevokedByPolicy(String permissionName, String packageName) {
-        return delegate.isPermissionRevokedByPolicy(permissionName, packageName);
+        return delegate.isPermissionRevokedByPolicy(permissionName, delegatePackageName(packageName));
     }
 
     @Override
@@ -322,7 +349,7 @@ final class TuyaPackageManager extends PackageManager {
 
     @Override
     public int checkSignatures(String packageName1, String packageName2) {
-        return delegate.checkSignatures(packageName1, packageName2);
+        return delegate.checkSignatures(delegatePackageName(packageName1), delegatePackageName(packageName2));
     }
 
     @Override
@@ -352,7 +379,7 @@ final class TuyaPackageManager extends PackageManager {
 
     @Override
     public boolean isInstantApp(String packageName) {
-        return delegate.isInstantApp(packageName);
+        return delegate.isInstantApp(delegatePackageName(packageName));
     }
 
     @Override
@@ -452,22 +479,22 @@ final class TuyaPackageManager extends PackageManager {
 
     @Override
     public InstrumentationInfo getInstrumentationInfo(ComponentName className, int flags) throws NameNotFoundException {
-        return delegate.getInstrumentationInfo(className, flags);
+        return delegate.getInstrumentationInfo(delegateComponentName(className), flags);
     }
 
     @Override
     public List<InstrumentationInfo> queryInstrumentation(String targetPackage, int flags) {
-        return delegate.queryInstrumentation(targetPackage, flags);
+        return delegate.queryInstrumentation(delegatePackageName(targetPackage), flags);
     }
 
     @Override
     public Drawable getDrawable(String packageName, int resid, ApplicationInfo applicationInfo) {
-        return delegate.getDrawable(packageName, resid, applicationInfo);
+        return delegate.getDrawable(delegatePackageName(packageName), resid, applicationInfo);
     }
 
     @Override
     public Drawable getActivityIcon(ComponentName activityName) throws NameNotFoundException {
-        return delegate.getActivityIcon(activityName);
+        return delegate.getActivityIcon(delegateComponentName(activityName));
     }
 
     @Override
@@ -477,7 +504,7 @@ final class TuyaPackageManager extends PackageManager {
 
     @Override
     public Drawable getActivityBanner(ComponentName activityName) throws NameNotFoundException {
-        return delegate.getActivityBanner(activityName);
+        return delegate.getActivityBanner(delegateComponentName(activityName));
     }
 
     @Override
@@ -497,7 +524,7 @@ final class TuyaPackageManager extends PackageManager {
 
     @Override
     public Drawable getApplicationIcon(String packageName) throws NameNotFoundException {
-        return delegate.getApplicationIcon(packageName);
+        return delegate.getApplicationIcon(delegatePackageName(packageName));
     }
 
     @Override
@@ -507,12 +534,12 @@ final class TuyaPackageManager extends PackageManager {
 
     @Override
     public Drawable getApplicationBanner(String packageName) throws NameNotFoundException {
-        return delegate.getApplicationBanner(packageName);
+        return delegate.getApplicationBanner(delegatePackageName(packageName));
     }
 
     @Override
     public Drawable getActivityLogo(ComponentName activityName) throws NameNotFoundException {
-        return delegate.getActivityLogo(activityName);
+        return delegate.getActivityLogo(delegateComponentName(activityName));
     }
 
     @Override
@@ -527,7 +554,7 @@ final class TuyaPackageManager extends PackageManager {
 
     @Override
     public Drawable getApplicationLogo(String packageName) throws NameNotFoundException {
-        return delegate.getApplicationLogo(packageName);
+        return delegate.getApplicationLogo(delegatePackageName(packageName));
     }
 
     @Override
@@ -547,12 +574,12 @@ final class TuyaPackageManager extends PackageManager {
 
     @Override
     public CharSequence getText(String packageName, int resid, ApplicationInfo applicationInfo) {
-        return delegate.getText(packageName, resid, applicationInfo);
+        return delegate.getText(delegatePackageName(packageName), resid, applicationInfo);
     }
 
     @Override
     public XmlResourceParser getXml(String packageName, int resid, ApplicationInfo applicationInfo) {
-        return delegate.getXml(packageName, resid, applicationInfo);
+        return delegate.getXml(delegatePackageName(packageName), resid, applicationInfo);
     }
 
     @Override
@@ -562,7 +589,7 @@ final class TuyaPackageManager extends PackageManager {
 
     @Override
     public Resources getResourcesForActivity(ComponentName activityName) throws NameNotFoundException {
-        return delegate.getResourcesForActivity(activityName);
+        return delegate.getResourcesForActivity(delegateComponentName(activityName));
     }
 
     @Override
@@ -572,7 +599,7 @@ final class TuyaPackageManager extends PackageManager {
 
     @Override
     public Resources getResourcesForApplication(String appPackageName) throws NameNotFoundException {
-        return delegate.getResourcesForApplication(appPackageName);
+        return delegate.getResourcesForApplication(delegatePackageName(appPackageName));
     }
 
     @Override
@@ -587,22 +614,22 @@ final class TuyaPackageManager extends PackageManager {
 
     @Override
     public void setInstallerPackageName(String targetPackage, String installerPackageName) {
-        delegate.setInstallerPackageName(targetPackage, installerPackageName);
+        delegate.setInstallerPackageName(delegatePackageName(targetPackage), installerPackageName);
     }
 
     @Override
     public String getInstallerPackageName(String packageName) {
-        return delegate.getInstallerPackageName(packageName);
+        return delegate.getInstallerPackageName(delegatePackageName(packageName));
     }
 
     @Override
     public void addPackageToPreferred(String packageName) {
-        delegate.addPackageToPreferred(packageName);
+        delegate.addPackageToPreferred(delegatePackageName(packageName));
     }
 
     @Override
     public void removePackageFromPreferred(String packageName) {
-        delegate.removePackageFromPreferred(packageName);
+        delegate.removePackageFromPreferred(delegatePackageName(packageName));
     }
 
     @Override
@@ -617,32 +644,32 @@ final class TuyaPackageManager extends PackageManager {
 
     @Override
     public void clearPackagePreferredActivities(String packageName) {
-        delegate.clearPackagePreferredActivities(packageName);
+        delegate.clearPackagePreferredActivities(delegatePackageName(packageName));
     }
 
     @Override
     public int getPreferredActivities(List<IntentFilter> outFilters, List<ComponentName> outActivities, String packageName) {
-        return delegate.getPreferredActivities(outFilters, outActivities, packageName);
+        return delegate.getPreferredActivities(outFilters, outActivities, delegatePackageName(packageName));
     }
 
     @Override
     public void setComponentEnabledSetting(ComponentName componentName, int newState, int flags) {
-        delegate.setComponentEnabledSetting(componentName, newState, flags);
+        delegate.setComponentEnabledSetting(delegateComponentName(componentName), newState, flags);
     }
 
     @Override
     public int getComponentEnabledSetting(ComponentName componentName) {
-        return delegate.getComponentEnabledSetting(componentName);
+        return delegate.getComponentEnabledSetting(delegateComponentName(componentName));
     }
 
     @Override
     public void setApplicationEnabledSetting(String packageName, int newState, int flags) {
-        delegate.setApplicationEnabledSetting(packageName, newState, flags);
+        delegate.setApplicationEnabledSetting(delegatePackageName(packageName), newState, flags);
     }
 
     @Override
     public int getApplicationEnabledSetting(String packageName) {
-        return delegate.getApplicationEnabledSetting(packageName);
+        return delegate.getApplicationEnabledSetting(delegatePackageName(packageName));
     }
 
     @Override
@@ -652,7 +679,7 @@ final class TuyaPackageManager extends PackageManager {
 
     @Override
     public void setApplicationCategoryHint(String packageName, int categoryHint) {
-        delegate.setApplicationCategoryHint(packageName, categoryHint);
+        delegate.setApplicationCategoryHint(delegatePackageName(packageName), categoryHint);
     }
 
     @Override

@@ -3,6 +3,7 @@ package com.emi.tuyeasie.data
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import com.emi.tuyeasie.TuyeasieApplication
 import com.thingclips.smart.android.user.api.ILoginCallback
 import com.thingclips.smart.android.user.api.IRegisterCallback
 import com.thingclips.smart.android.user.bean.User
@@ -31,7 +32,7 @@ class TuyaActivationRepository(context: Context) {
         fun onFailure(stage: String, code: String, message: String)
     }
 
-    private val appContext = context.applicationContext
+    private val appContext = (context.applicationContext as TuyeasieApplication).tuyaContext
     private val mainHandler = Handler(Looper.getMainLooper())
     private var operationGeneration = 0
     private var activationToken: String? = null
