@@ -118,14 +118,16 @@ final class TuyaPackageManager extends PackageManager {
         Log.d(LOG_TAG, "packageName=" + packageInfo.packageName
                 + " signatures.length=" + packageInfo.signatures.length);
         logDerSha256Once(officialSignatureSha256);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            Api28Impl.setSigningInfo(packageInfo, officialSignature);
+        // SigningInfo has no public constructor before Android 15. The Tuya SDK (Java and libthing_security.so)
+        // reads only the legacy `signatures` field, so older releases keep the real signingInfo.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+            Api35Impl.setSigningInfo(packageInfo, officialSignature);
         }
         return packageInfo;
     }
 
-    @TargetApi(Build.VERSION_CODES.P)
-    private static final class Api28Impl {
+    @TargetApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
+    private static final class Api35Impl {
         private static void setSigningInfo(PackageInfo packageInfo, Signature signature) {
             Collection<Signature> signers = Collections.singletonList(signature);
             Collection<PublicKey> publicKeys = Collections.emptyList();
