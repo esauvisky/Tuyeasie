@@ -16,7 +16,9 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Bluetooth
+import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material.icons.outlined.Wifi
@@ -36,6 +38,7 @@ import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -100,8 +103,44 @@ fun HomeAssistantActions(state: OnboardingUiState, viewModel: OnboardingViewMode
     }
 }
 
+// Searches the LAN once when no URL is set yet; a single result fills the URL, several are listed to pick from.
+@Composable
+private fun HomeAssistantDiscoveryRows(state: OnboardingUiState, viewModel: OnboardingViewModel) {
+    LaunchedEffect(Unit) {
+        if (state.settings.hassUrl.isBlank() && state.discoveredHomeAssistants == null && !state.discoveringHomeAssistant) {
+            viewModel.discoverHomeAssistant()
+        }
+    }
+    val hassUrl = state.settings.hassUrl.trim().trimEnd('/')
+    Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        val status = when {
+            state.discoveringHomeAssistant -> "Searching this network…"
+            state.discoveredHomeAssistants?.isEmpty() == true -> "None found on this network. Enter the URL by hand."
+            state.discoveredHomeAssistants != null -> "Found on this network"
+            else -> "Find Home Assistant on this network"
+        }
+        Text(status, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+        if (state.discoveringHomeAssistant) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+        else IconButton(onClick = viewModel::discoverHomeAssistant, enabled = !state.testingConnection) {
+            Icon(Icons.Outlined.Refresh, contentDescription = "Search the network for Home Assistant")
+        }
+    }
+    state.homeAssistantDiscoveryError?.let { InlineError(it) }
+    state.discoveredHomeAssistants.orEmpty().forEach { found ->
+        val selected = found.url == hassUrl
+        EntityRow(
+            icon = { EntityIcon(Icons.Outlined.Home, if (selected) RowTone.OK else RowTone.NEUTRAL) },
+            title = found.name,
+            state = if (selected) "${found.url} · selected" else found.url,
+            enabled = !state.testingConnection,
+            onClick = { viewModel.updateHassUrl(found.url) }
+        )
+    }
+}
+
 @Composable
 fun HomeAssistantFields(state: OnboardingUiState, viewModel: OnboardingViewModel) {
+    HomeAssistantDiscoveryRows(state, viewModel)
     Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedTextField(
             value = state.settings.hassUrl,

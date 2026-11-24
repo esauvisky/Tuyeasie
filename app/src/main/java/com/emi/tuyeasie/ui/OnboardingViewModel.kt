@@ -27,6 +27,9 @@ import com.emi.tuyeasie.data.HaEntryAssociation
 import com.emi.tuyeasie.data.IntegrationKeys
 import com.emi.tuyeasie.data.IntegrationStatus
 
+import com.emi.tuyeasie.data.DiscoveredHomeAssistant
+import com.emi.tuyeasie.data.HomeAssistantDiscovery
+import com.emi.tuyeasie.data.HomeAssistantDiscoveryException
 import com.emi.tuyeasie.data.HotspotRepository
 import com.emi.tuyeasie.data.NearbyNetwork
 import com.emi.tuyeasie.data.NetworkReport
@@ -106,6 +109,10 @@ data class OnboardingUiState(
     val networks: List<NearbyNetwork> = emptyList(),
     val networksError: String? = null,
     val locationOff: Boolean = false,
+    val discoveringHomeAssistant: Boolean = false,
+    // Null until a discovery has finished, so "none found" is distinct from "not searched yet".
+    val discoveredHomeAssistants: List<DiscoveredHomeAssistant>? = null,
+    val homeAssistantDiscoveryError: String? = null,
     val activationStatus: ActivationStatus = ActivationStatus.IDLE,
     val activationProgress: String? = null,
     val activationError: String? = null,
@@ -390,6 +397,22 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
             update { copy(isLoading = false, settings = settings) }
             // A saved, complete setup goes straight to pairing, once Home Assistant answers when one is set.
             if (validateSettings(settings) == null) testConnection()
+        }
+    }
+
+    fun discoverHomeAssistant() {
+        check(!current.discoveringHomeAssistant) { "Home Assistant discovery is already running" }
+        update { copy(discoveringHomeAssistant = true, discoveredHomeAssistants = null, homeAssistantDiscoveryError = null) }
+        viewModelScope.launch {
+            try {
+                val found = HomeAssistantDiscovery.discover(getApplication<Application>())
+                update { copy(discoveredHomeAssistants = found) }
+                if (found.size == 1 && current.settings.hassUrl.isBlank()) updateHassUrl(found.single().url)
+            } catch (e: HomeAssistantDiscoveryException) {
+                update { copy(homeAssistantDiscoveryError = e.message) }
+            } finally {
+                update { copy(discoveringHomeAssistant = false) }
+            }
         }
     }
 
