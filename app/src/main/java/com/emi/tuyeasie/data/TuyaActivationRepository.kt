@@ -130,6 +130,7 @@ class TuyaActivationRepository(context: Context) {
             mac = device.scan.mac
             deviceType = device.scan.deviceType
             productId = device.scan.productId
+            flag = device.scan.flag
             ssid = settings.homeWifiSsid.trim()
             pwd = settings.homeWifiPassword
             this.token = token
