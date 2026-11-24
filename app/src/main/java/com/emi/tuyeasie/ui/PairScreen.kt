@@ -137,7 +137,7 @@ fun WifiFields(state: OnboardingUiState, viewModel: OnboardingViewModel) {
     }
     if (ssid.isBlank()) {
         CardText("Devices join this 2.4 GHz network.")
-        NetworkList(state.networks, state.networksError, null, require24Ghz = true, enabled = true, onRefresh = viewModel::refreshNetworks, onSelect = select)
+        NetworkList(state.networks, state.networksError, state.locationOff, null, require24Ghz = true, enabled = true, onRefresh = viewModel::refreshNetworks, onSelect = select)
         return
     }
     EntityRow(
@@ -168,7 +168,7 @@ fun WifiFields(state: OnboardingUiState, viewModel: OnboardingViewModel) {
             title = { Text("Home Wi-Fi") },
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
-                    NetworkList(state.networks, state.networksError, ssid, require24Ghz = true, enabled = true, onRefresh = viewModel::refreshNetworks, onSelect = select)
+                    NetworkList(state.networks, state.networksError, state.locationOff, ssid, require24Ghz = true, enabled = true, onRefresh = viewModel::refreshNetworks, onSelect = select)
                 }
             },
             confirmButton = { TextButton(onClick = { picking = false }) { Text("Cancel") } }
@@ -215,6 +215,7 @@ private fun NearbyCard(state: OnboardingUiState, viewModel: OnboardingViewModel,
                 StatusLine(it, busy = state.hotspotStatus == HotspotStatus.PREPARING || scanning)
             }
         }
+        if (state.locationOff && !pairing) LocationOffError("Location is off, so Tuya hotspots can't be found. Turn it on, then tap Scan.")
         state.hotspotError?.let { error ->
             InlineError(error)
             if (!state.activationReady && state.hotspotStatus == HotspotStatus.ERROR) {
@@ -252,6 +253,7 @@ private fun NearbyCard(state: OnboardingUiState, viewModel: OnboardingViewModel,
                     NetworkList(
                         networks = state.networks,
                         error = state.networksError,
+                        locationOff = state.locationOff,
                         selectedSsid = null,
                         require24Ghz = false,
                         enabled = tappable,

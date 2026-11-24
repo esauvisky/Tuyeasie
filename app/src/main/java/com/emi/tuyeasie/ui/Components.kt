@@ -1,8 +1,10 @@
 package com.emi.tuyeasie.ui
 
 import android.content.ClipData
+import android.content.Intent
 import android.os.Build
 import android.os.PersistableBundle
+import android.provider.Settings
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -53,6 +55,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.liveRegion
@@ -221,6 +224,15 @@ fun InlineError(text: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
+fun LocationOffError(text: String) {
+    val context = LocalContext.current
+    InlineError(text)
+    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.End) {
+        CardAction("Open Location settings", { context.startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)) })
+    }
+}
+
+@Composable
 fun StatusLine(text: String, busy: Boolean) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).semantics { liveRegion = LiveRegionMode.Polite },
@@ -329,6 +341,7 @@ private const val NETWORK_REFRESH_MILLIS = 10_000L
 fun NetworkList(
     networks: List<NearbyNetwork>,
     error: String?,
+    locationOff: Boolean,
     selectedSsid: String?,
     require24Ghz: Boolean,
     enabled: Boolean,
@@ -348,7 +361,8 @@ fun NetworkList(
         }
     }
     error?.let { InlineError(it) }
-    if (error == null && networks.isEmpty()) CardText("No networks found yet. Scanning every 10 seconds.")
+    if (locationOff) LocationOffError("Location is off. Android only lists nearby Wi-Fi networks while Location is on.")
+    if (error == null && !locationOff && networks.isEmpty()) CardText("No networks found yet. Scanning every 10 seconds.")
     networks.forEach { network ->
         val unsupported = require24Ghz && !network.has24Ghz
         val selected = network.ssid == selectedSsid

@@ -105,6 +105,7 @@ data class OnboardingUiState(
     val hotspotError: String? = null,
     val networks: List<NearbyNetwork> = emptyList(),
     val networksError: String? = null,
+    val locationOff: Boolean = false,
     val activationStatus: ActivationStatus = ActivationStatus.IDLE,
     val activationProgress: String? = null,
     val activationError: String? = null,
@@ -432,7 +433,11 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
             }
             return
         }
-        update { copy(networksError = null) }
+        if (!hotspotRepository.isLocationEnabled()) {
+            update { copy(networks = emptyList(), networksError = null, locationOff = true) }
+            return
+        }
+        update { copy(networksError = null, locationOff = false) }
         hotspotRepository.requestNearbyScan()
         viewModelScope.launch {
             // Give the scan a moment to land; the cached list is shown immediately either way.
@@ -942,7 +947,8 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     private fun scanDevices() {
         pendingLookupUuid = null
         val bluetoothOn = bleRepository.isBluetoothOn()
-        wifiScanPending = true
+        val locationOn = hotspotRepository.isLocationEnabled()
+        wifiScanPending = locationOn
         bleScanPending = bluetoothOn
         bluetoothOffDuringScan = !bluetoothOn
         wifiScanError = null
@@ -952,12 +958,14 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 hotspotMessage = if (bluetoothOn) "Scanning for Tuya hotspots and Bluetooth devices…"
                 else "Scanning for Tuya hotspots. Bluetooth is off, so Bluetooth devices will not be found.",
                 hotspotError = null,
+                locationOff = !locationOn,
                 hotspots = emptyList(),
                 bleDevices = emptyList()
             )
         }
-        hotspotRepository.scan()
+        if (locationOn) hotspotRepository.scan()
         if (bluetoothOn) bleRepository.scan()
+        if (!locationOn) finishScanIfDone()
     }
 
     private fun finishScanIfDone() {

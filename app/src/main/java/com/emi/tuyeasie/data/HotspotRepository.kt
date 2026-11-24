@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.location.LocationManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -15,6 +16,7 @@ import android.os.Handler
 import android.os.Looper
 import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
+import androidx.core.location.LocationManagerCompat
 
 data class TuyaHotspot(
     val ssid: String,
@@ -40,6 +42,7 @@ class HotspotRepository(context: Context) {
     private val appContext = context.applicationContext
     private val wifiManager = appContext.getSystemService(WifiManager::class.java)
     private val connectivityManager = appContext.getSystemService(ConnectivityManager::class.java)
+    private val locationManager = appContext.getSystemService(LocationManager::class.java)
     private val mainHandler = Handler(Looper.getMainLooper())
     private var generation = 0
     private var scanReceiver: BroadcastReceiver? = null
@@ -85,13 +88,13 @@ class HotspotRepository(context: Context) {
             if (cached.isNotEmpty()) {
                 completeScan(scanGeneration)
             } else {
-                failScan(
-                    scanGeneration,
-                    "Hotspot scanning is unavailable. Turn on Wi-Fi and Location Services, then retry."
-                )
+                failScan(scanGeneration, "Hotspot scanning is unavailable. Turn on Wi-Fi, then retry.")
             }
         }
     }
+
+    // Android returns empty scan results, without any error, while device Location is off.
+    fun isLocationEnabled(): Boolean = LocationManagerCompat.isLocationEnabled(locationManager)
 
     // Android throttles startScan (returns false) by design; callers still read the system's cached results.
     fun requestNearbyScan() {
