@@ -69,19 +69,21 @@ fun PairScreen(
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        if (state.stage == PairStage.SETUP) SetupCard(state, viewModel) else NearbyCard(state, viewModel, onOpenWifiSettings)
+        if (state.stage == PairStage.SETUP) SetupCards(state, viewModel) else NearbyCard(state, viewModel, onOpenWifiSettings)
     }
 }
 
 @Composable
-private fun SetupCard(state: OnboardingUiState, viewModel: OnboardingViewModel) {
-    HaCard(title = "Connect Home Assistant") {
-        CardText("Home Assistant is optional. Enter its URL and an administrator long-lived access token to add devices to it, " +
+private fun SetupCards(state: OnboardingUiState, viewModel: OnboardingViewModel) {
+    HaCard(title = "1. Home Wi-Fi") {
+        WifiFields(state, viewModel)
+    }
+    HaCard(title = "2. Home Assistant (optional)") {
+        CardText("Add a URL and an administrator long-lived access token to add paired devices to Home Assistant, " +
             "or leave both empty to only pair devices with Tuya and get their local keys.")
         HomeAssistantFields(state, viewModel)
-        WifiFields(state, viewModel)
         state.connectionError?.let { InlineError(it) }
-        HomeAssistantActions(state, viewModel, if (state.settings.homeAssistantConfigured) "Connect" else "Continue")
+        HomeAssistantActions(state, viewModel, if (state.settings.homeAssistantConfigured) "Connect" else "Continue without it")
     }
 }
 

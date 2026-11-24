@@ -29,7 +29,11 @@ import java.time.LocalDate
 @Composable
 fun SettingsScreen(state: OnboardingUiState, viewModel: OnboardingViewModel, devicesViewModel: MyDevicesViewModel, padding: PaddingValues) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(padding).padding(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        HaCard(title = "Home Assistant") {
+        HaCard(title = "Home Wi-Fi") {
+            WifiFields(state, viewModel)
+            Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), horizontalArrangement = Arrangement.End) { CardAction("Save", viewModel::saveWifi) }
+        }
+        HaCard(title = "Home Assistant (optional)") {
             HomeAssistantFields(state, viewModel)
             when {
                 state.connectionError != null -> InlineError(state.connectionError)
@@ -38,10 +42,6 @@ fun SettingsScreen(state: OnboardingUiState, viewModel: OnboardingViewModel, dev
                 !state.settings.homeAssistantConfigured -> CardText("Not set up. Devices are only paired with Tuya.")
             }
             HomeAssistantActions(state, viewModel, if (state.settings.homeAssistantConfigured) "Save and test" else "Save")
-        }
-        HaCard(title = "Home Wi-Fi") {
-            WifiFields(state, viewModel)
-            Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), horizontalArrangement = Arrangement.End) { CardAction("Save", viewModel::saveWifi) }
         }
         AccountsCard(devicesViewModel)
         SettingsFileCard(devicesViewModel, importEnabled = !state.busy, onImported = viewModel::reloadSettings)
