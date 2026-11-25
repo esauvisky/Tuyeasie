@@ -57,10 +57,6 @@ fun deviceCapabilities(bean: com.thingclips.smart.sdk.bean.DeviceBean): DeviceCa
     )
 }
 
-// One country code per Tuya data center, following the SDK's own mapping in ApiUrlProvider.getDefaultRegion:
-// +1 America (AZ), +49 Europe (EU), +91 India (IN), +7 Russia (RU), +86 mainland China (AY).
-private val DATA_CENTER_PROBE_CODES = listOf("1", "49", "91", "7", "86")
-
 private val regionLock = Mutex()
 
 class TuyaAccountRepository(context: Context, private val store: SecureSettingsStore) {
@@ -81,25 +77,15 @@ class TuyaAccountRepository(context: Context, private val store: SecureSettingsS
     }
 
     /**
-     * Finds the data center an existing account lives in by signing in through each one in turn, starting with
-     * the phone's own country. It only ever logs in, so a wrong data center can never get a duplicate account.
+     * Finds an existing account's data center with a login that cannot register a duplicate. Tuya answers even
+     * when the request's country code points elsewhere; the returned user carries the account's real region.
      */
     suspend fun signInExisting(uid: String, password: String): TuyaAccount {
         logOutIfSignedIn()
-        val failures = mutableListOf<String>()
-        for (code in (listOf(CountryCodeProvider.current(appContext)) + DATA_CENTER_PROBE_CODES).distinct()) {
-            // A data center that does not hold the account rejects the login; every rejection is reported if none takes it.
-            try {
-                login(code, uid, password, register = false)
-            } catch (e: TuyaSdkException) {
-                failures += "+$code: ${e.message}"
-                continue
-            }
-            val account = TuyaAccount(uid, password, code)
-            recordDataCenter(account)
-            return account
-        }
-        throw TuyaSdkException("Tuya account sign-in", "NO_DATA_CENTER", "No Tuya data center accepted this account. ${failures.joinToString("; ")}")
+        val user = login(CountryCodeProvider.current(appContext), uid, password, register = false)
+        val account = TuyaAccount(uid, password, checkNotNull(user.phoneCode) { "Signed-in Tuya user has no country code" })
+        recordDataCenter(account)
+        return account
     }
 
     /** Replaces the locale-guessed country code of accounts saved before codes were stored per account. */
@@ -209,10 +195,10 @@ class TuyaAccountRepository(context: Context, private val store: SecureSettingsS
         }
     }
 
-    private suspend fun login(countryCode: String, uid: String, password: String, register: Boolean) {
-        suspendCancellableCoroutine { cont ->
+    private suspend fun login(countryCode: String, uid: String, password: String, register: Boolean): User {
+        return suspendCancellableCoroutine { cont ->
             val callback = object : ILoginCallback {
-                override fun onSuccess(user: User) = cont.resume(Unit)
+                override fun onSuccess(user: User) = cont.resume(user)
                 override fun onError(code: String, error: String) =
                     cont.resumeWithException(TuyaSdkException("Tuya account sign-in", code, error))
             }
