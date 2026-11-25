@@ -73,7 +73,7 @@ fun DevicesScreen(
                         },
                         title = device.name,
                         state = listOfNotNull(
-                            online?.let { if (it) "Online" else "Offline" }, lanAddress(device.activated.ip), entry.saved.kind.label, device.homeName
+                            online?.let { if (it) "Online" else "Offline" }, lanAddress(device.activated.ip), entry.saved.kind.label
                         ).joinToString(" · "),
                         tone = when (online) {
                             true -> RowTone.OK
