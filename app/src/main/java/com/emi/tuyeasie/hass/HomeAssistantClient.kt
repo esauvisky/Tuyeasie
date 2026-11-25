@@ -1134,8 +1134,26 @@ internal object HomeAssistantProtocol {
 
     class LocalTuyaEntity(val platform: String, val fields: Map<String, Any?>)
 
-    /** Controls become switches, selects and numbers; read-only values become sensors. Raw data points get none. */
-    fun localTuyaEntities(dataPoints: List<TuyaDataPointSchema>): List<LocalTuyaEntity> = dataPoints.mapNotNull { dp ->
+    // Tuya's standard codes on IR blasters (category wnykq), the same ones Local Tuya's own remote mapping uses.
+    const val IR_SEND_CODE = "ir_send"
+    const val IR_LEARNED_CODE = "ir_study_code"
+
+    /**
+     * Controls become switches, selects and numbers; read-only values become sensors. Raw data points get none.
+     * An IR blaster's send and learned-code data points together become one remote, which learns and sends codes.
+     */
+    fun localTuyaEntities(dataPoints: List<TuyaDataPointSchema>): List<LocalTuyaEntity> {
+        val send = dataPoints.firstOrNull { it.code == IR_SEND_CODE } ?: return dataPointEntities(dataPoints)
+        val learned = dataPoints.firstOrNull { it.code == IR_LEARNED_CODE }
+        val remote = LocalTuyaEntity("remote", buildMap {
+            put("id", send.id)
+            put("friendly_name", "IR remote")
+            if (learned != null) put("receive_dp", learned.id)
+        })
+        return listOf(remote) + dataPointEntities(dataPoints.filter { it !== send && it !== learned })
+    }
+
+    private fun dataPointEntities(dataPoints: List<TuyaDataPointSchema>): List<LocalTuyaEntity> = dataPoints.mapNotNull { dp ->
         val base = linkedMapOf<String, Any?>("id" to dp.id, "friendly_name" to dataPointName(dp))
         val property = JSON.parseObject(dp.propertyJson)
         val settable = mapOf("restore_on_reconnect" to false, "is_passive_entity" to false)

@@ -68,6 +68,23 @@ class HomeAssistantClientTest {
     }
 
     @Test
+    fun turnsIrBlasterDataPointsIntoOneRemote() {
+        fun dp(id: String, code: String, mode: String, schemaType: String, property: String = "{}") =
+            TuyaDataPointSchema(id, code, code, mode, "obj", property, schemaType)
+        val points = listOf(
+            dp("101", "va_temperature", "ro", "value", """{"min":-200,"max":600,"scale":1,"step":1,"unit":"°C"}"""),
+            dp("201", "ir_send", "rw", "string"),
+            dp("202", "ir_study_code", "ro", "string")
+        )
+
+        val entities = HomeAssistantProtocol.localTuyaEntities(points)
+        assertEquals(listOf("remote", "sensor"), entities.map { it.platform })
+        assertEquals("201", entities[0].fields["id"])
+        assertEquals("202", entities[0].fields["receive_dp"])
+        assertEquals("101", entities[1].fields["id"])
+    }
+
+    @Test
     fun constructsOnvifConfigurePayload() {
         val payload = HomeAssistantProtocol.onvifConfigurePayload("Porch", "192.168.1.30", 8000, "admin", "secret")
 
