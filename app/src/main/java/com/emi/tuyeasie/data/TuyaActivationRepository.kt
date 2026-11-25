@@ -5,6 +5,7 @@ import android.os.Handler
 import android.os.Looper
 import com.emi.tuyeasie.TuyeasieApplication
 import com.thingclips.smart.android.user.api.ILoginCallback
+import com.thingclips.smart.android.user.api.ILogoutCallback
 import com.thingclips.smart.android.user.api.IRegisterCallback
 import com.thingclips.smart.android.user.bean.User
 import com.thingclips.smart.home.sdk.ThingHomeSdk
@@ -44,7 +45,7 @@ class TuyaActivationRepository(context: Context) {
 
     var listener: Listener? = null
 
-    fun prepare(countryCode: String, account: TuyaAccount, auth: AccountAuth) {
+    fun prepare(account: TuyaAccount, auth: AccountAuth) {
         stopActivator()
         activationToken = null
         homeId = null
@@ -60,13 +61,30 @@ class TuyaActivationRepository(context: Context) {
             }
         }
         val user = ThingHomeSdk.getUserInstance()
+        // The SDK keeps the previous account's data-center domain until logout, so a session in another
+        // region must end before signing in; same-region switches log in over it as before.
+        if (user.isLogin && checkNotNull(user.user) { "Signed-in Tuya session has no user" }.phoneCode != account.countryCode) {
+            user.logout(object : ILogoutCallback {
+                override fun onSuccess() = onCurrent(generation) { signIn(generation, account, auth, loginCallback) }
+
+                override fun onError(code: String, error: String) = onCurrent(generation) {
+                    failure("Tuya sign-out from the previous region", code, error)
+                }
+            })
+            return
+        }
+        signIn(generation, account, auth, loginCallback)
+    }
+
+    private fun signIn(generation: Int, account: TuyaAccount, auth: AccountAuth, loginCallback: ILoginCallback) {
+        val user = ThingHomeSdk.getUserInstance()
         when (auth) {
-            AccountAuth.LOGIN -> user.loginWithUid(countryCode, account.uid, account.password, loginCallback)
+            AccountAuth.LOGIN -> user.loginWithUid(account.countryCode, account.uid, account.password, loginCallback)
             // The official app upgrades its guest to a full account before Bluetooth pairing; match that.
             AccountAuth.LOGIN_OR_REGISTER ->
-                user.loginOrRegisterWithUid(countryCode, account.uid, account.password, loginCallback)
+                user.loginOrRegisterWithUid(account.countryCode, account.uid, account.password, loginCallback)
             AccountAuth.REGISTER -> user.registerAccountWithUid(
-                countryCode,
+                account.countryCode,
                 account.uid,
                 account.password,
                 object : IRegisterCallback {

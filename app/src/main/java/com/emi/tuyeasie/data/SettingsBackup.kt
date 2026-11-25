@@ -54,7 +54,7 @@ class SettingsBackup(private val store: SecureSettingsStore) {
             .put("encryption", encryption)
             .put("accounts", JSONArray(accounts.map { account ->
                 JSONObject().put("kind", account.kind.name).put("username", account.account.uid)
-                    .put("password", seal(account.account.password))
+                    .put("password", seal(account.account.password)).put("countryCode", account.account.countryCode)
             }))
             .put("settings", JSONObject().put("hassUrl", settings.hassUrl)
                 .put("adminToken", seal(settings.adminToken)).put("countryCode", settings.countryCode)
@@ -107,8 +107,12 @@ class SettingsBackup(private val store: SecureSettingsStore) {
                 homeWifiSsid = saved.getString("homeWifiSsid"),
                 homeWifiPassword = open(saved.getJSONObject("homeWifiPassword"))
             )
+            // Format 3 kept no per-account code; its accounts signed in with the exporting phone's locale,
+            // which is what settings.countryCode recorded.
+            val legacyFormat = root.getInt("version") == LEGACY_VERSION
             val accounts = root.getJSONArray("accounts").objects().map {
-                TuyaAccountKind.valueOf(it.getString("kind")) to TuyaAccount(it.getString("username"), open(it.getJSONObject("password")))
+                val countryCode = if (legacyFormat) settings.countryCode else it.getString("countryCode")
+                TuyaAccountKind.valueOf(it.getString("kind")) to TuyaAccount(it.getString("username"), open(it.getJSONObject("password")), countryCode)
             }
             val devices = root.getJSONArray("devices").objects().map { device ->
                 val capabilities = if (device.isNull("capabilities")) null else device.getJSONObject("capabilities").let { caps ->
@@ -152,6 +156,7 @@ class SettingsBackup(private val store: SecureSettingsStore) {
                         TuyaAccountKind.TEMPORARY -> store.saveGeneratedTuyaAccount(account)
                         TuyaAccountKind.USER -> store.saveCameraAccount(account)
                     }
+                    if (legacyFormat) store.markRegionGuessed(kind)
                 }
                 devices.forEach { (deviceId, capabilities, integrations) ->
                     if (capabilities != null) store.saveCapabilities(deviceId, capabilities)
@@ -167,7 +172,7 @@ class SettingsBackup(private val store: SecureSettingsStore) {
         val root = JSONObject(json)
         if (root.optString("format") != FORMAT) throw SettingsFileException("This is not a Tuyeasie settings file.")
         val version = root.getInt("version")
-        if (version != VERSION) {
+        if (version != VERSION && version != LEGACY_VERSION) {
             throw SettingsFileException("This file is in format $version, and this version of Tuyeasie reads format $VERSION. Export it again with the same version.")
         }
         return root
@@ -188,7 +193,8 @@ class SettingsBackup(private val store: SecureSettingsStore) {
 
     private companion object {
         const val FORMAT = "tuyeasie-backup"
-        const val VERSION = 3
+        const val VERSION = 4
+        const val LEGACY_VERSION = 3
         const val CIPHER = "AES/GCM/NoPadding"
         const val KDF = "PBKDF2WithHmacSHA256"
         const val PBKDF2_ITERATIONS = 210_000

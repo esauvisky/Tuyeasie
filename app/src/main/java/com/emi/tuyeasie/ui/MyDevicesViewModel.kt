@@ -32,6 +32,8 @@ import kotlinx.coroutines.withContext
 
 data class AccountDevicesState(
     val saved: SavedTuyaAccount,
+    // Tuya's data-center code ("AZ", "EU", "IN", "RU", "AY"), known once the account has signed in on this phone.
+    val dataCenter: String? = null,
     val loading: Boolean = false,
     val devices: List<TuyaManagedDevice>? = null,
     val error: String? = null
@@ -128,7 +130,7 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
                 accounts = saved.map { account ->
                     val cached = existingByAccount[account]?.devices
                         ?: store.loadCachedDevices(account.account.uid)
-                    AccountDevicesState(account, loading = true, devices = cached)
+                    AccountDevicesState(account, store.loadDataCenter(account.account.uid), loading = true, devices = cached)
                 },
                 refreshing = true,
                 actionError = null
@@ -197,6 +199,7 @@ class MyDevicesViewModel(application: Application) : AndroidViewModel(applicatio
         }
         updateAccount(saved) {
             it.copy(
+                dataCenter = store.loadDataCenter(saved.account.uid),
                 loading = false,
                 devices = result.getOrNull() ?: it.devices,
                 error = result.exceptionOrNull()?.message

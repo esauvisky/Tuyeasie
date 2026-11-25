@@ -29,11 +29,17 @@ data class ActivatedDevice(
     val ip: String?
 )
 
+// Tuya's US data center, for every account Tuyeasie creates. Accounts only serve pairing and the odd
+// cloud call afterwards; Home Assistant controls devices locally, so the region's latency never matters.
+const val NEW_ACCOUNT_COUNTRY_CODE = "1"
+
+// countryCode picks the Tuya data center the account lives in, so it is fixed when the account is created.
 data class TuyaAccount(
     val uid: String,
-    val password: String
+    val password: String,
+    val countryCode: String
 ) {
-    override fun toString() = "TuyaAccount(uid=$uid, password=[redacted])"
+    override fun toString() = "TuyaAccount(uid=$uid, password=[redacted], countryCode=$countryCode)"
 }
 
 data class OnvifRecord(
@@ -73,6 +79,10 @@ class SecureSettingsStore(context: Context) {
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
     )
 
+    init {
+        migrateAccountCountryCodes()
+    }
+
     fun loadSettings(): AppSettings = AppSettings(
         hassUrl = preferences.getString(KEY_HASS_URL, "").orEmpty(),
         adminToken = preferences.getString(KEY_ADMIN_TOKEN, "").orEmpty(),
@@ -93,16 +103,12 @@ class SecureSettingsStore(context: Context) {
     }
 
     fun loadOrCreateTuyaAccount(): TuyaAccount {
-        val uid = preferences.getString(KEY_TUYA_UID, null)
-        if (uid != null) {
-            return TuyaAccount(uid, checkNotNull(preferences.getString(KEY_TUYA_PASSWORD, null)) {
-                "Stored Tuya account has no password"
-            })
-        }
-        val account = TuyaAccount("tuyeasie${randomHex(12)}", randomHex(16))
+        loadExistingTuyaAccount()?.let { return it }
+        val account = TuyaAccount("tuyeasie${randomHex(12)}", randomHex(16), NEW_ACCOUNT_COUNTRY_CODE)
         val committed = preferences.edit()
             .putString(KEY_TUYA_UID, account.uid)
             .putString(KEY_TUYA_PASSWORD, account.password)
+            .putString(KEY_TUYA_COUNTRY_CODE, account.countryCode)
             .commit()
         check(committed) { "Unable to persist Tuya account" }
         return account
@@ -112,6 +118,8 @@ class SecureSettingsStore(context: Context) {
         val committed = preferences.edit()
             .putString(KEY_TUYA_UID, account.uid)
             .putString(KEY_TUYA_PASSWORD, account.password)
+            .putString(KEY_TUYA_COUNTRY_CODE, account.countryCode)
+            .remove(KEY_TUYA_REGION_GUESSED)
             .commit()
         check(committed) { "Unable to persist Tuya account" }
     }
@@ -120,6 +128,8 @@ class SecureSettingsStore(context: Context) {
         val uid = preferences.getString(KEY_CAMERA_EMAIL, null) ?: return null
         return TuyaAccount(uid, checkNotNull(preferences.getString(KEY_CAMERA_PASSWORD, null)) {
             "Stored camera account has no password"
+        }, checkNotNull(preferences.getString(KEY_CAMERA_COUNTRY_CODE, null)) {
+            "Stored camera account has no country code"
         })
     }
 
@@ -127,6 +137,8 @@ class SecureSettingsStore(context: Context) {
         val editor = preferences.edit()
             .putString(KEY_CAMERA_EMAIL, account.uid)
             .putString(KEY_CAMERA_PASSWORD, account.password)
+            .putString(KEY_CAMERA_COUNTRY_CODE, account.countryCode)
+            .remove(KEY_CAMERA_REGION_GUESSED)
             .remove(KEY_EXTRA_ACCOUNTS)
         preferences.all.keys
             .filter { it.startsWith(KEY_EXTRA_PASSWORD_PREFIX) }
@@ -135,17 +147,55 @@ class SecureSettingsStore(context: Context) {
         check(committed) { "Unable to persist camera account" }
     }
 
+    // A guessed code is the phone locale's, recorded for an account saved before codes were stored per account.
+    fun isRegionGuessed(kind: TuyaAccountKind): Boolean = preferences.getBoolean(regionGuessedKey(kind), false)
+
+    fun markRegionGuessed(kind: TuyaAccountKind) {
+        check(preferences.edit().putBoolean(regionGuessedKey(kind), true).commit()) { "Unable to persist the guessed region" }
+    }
+
+    private fun regionGuessedKey(kind: TuyaAccountKind) = when (kind) {
+        TuyaAccountKind.TEMPORARY -> KEY_TUYA_REGION_GUESSED
+        TuyaAccountKind.USER -> KEY_CAMERA_REGION_GUESSED
+    }
+
+    // Tuya's code for the data center the account last signed in to, such as "EU"; null until it has signed in.
+    fun loadDataCenter(accountUid: String): String? = preferences.getString(KEY_DATA_CENTER_PREFIX + accountUid, null)
+
+    fun saveDataCenter(accountUid: String, regionCode: String) {
+        check(preferences.edit().putString(KEY_DATA_CENTER_PREFIX + accountUid, regionCode).commit()) {
+            "Unable to persist the Tuya data center"
+        }
+    }
+
     fun loadExistingTuyaAccount(): TuyaAccount? {
         val uid = preferences.getString(KEY_TUYA_UID, null) ?: return null
         return TuyaAccount(uid, checkNotNull(preferences.getString(KEY_TUYA_PASSWORD, null)) {
             "Stored Tuya account has no password"
+        }, checkNotNull(preferences.getString(KEY_TUYA_COUNTRY_CODE, null)) {
+            "Stored Tuya account has no country code"
         })
+    }
+
+    // Accounts saved before 2.6.1 have no stored code; they signed in with the phone's locale every time, so
+    // that code is kept and marked guessed until a sign-in probe confirms the data center the account is in.
+    private fun migrateAccountCountryCodes() {
+        val legacy = listOf(
+            Triple(KEY_TUYA_UID, KEY_TUYA_COUNTRY_CODE, KEY_TUYA_REGION_GUESSED),
+            Triple(KEY_CAMERA_EMAIL, KEY_CAMERA_COUNTRY_CODE, KEY_CAMERA_REGION_GUESSED)
+        ).filter { (uidKey, codeKey) -> preferences.contains(uidKey) && !preferences.contains(codeKey) }
+        if (legacy.isEmpty()) return
+        val code = CountryCodeProvider.current(appContext)
+        val editor = preferences.edit()
+        legacy.forEach { (_, codeKey, guessedKey) -> editor.putString(codeKey, code).putBoolean(guessedKey, true) }
+        check(editor.commit()) { "Unable to persist Tuya account country codes" }
     }
 
     fun deleteGeneratedTuyaAccount() {
         val uid = preferences.getString(KEY_TUYA_UID, null)
-        val editor = preferences.edit().remove(KEY_TUYA_UID).remove(KEY_TUYA_PASSWORD)
-        if (uid != null) editor.remove(KEY_CACHED_DEVICES_PREFIX + uid)
+        val editor = preferences.edit().remove(KEY_TUYA_UID).remove(KEY_TUYA_PASSWORD).remove(KEY_TUYA_COUNTRY_CODE)
+            .remove(KEY_TUYA_REGION_GUESSED)
+        if (uid != null) editor.remove(KEY_CACHED_DEVICES_PREFIX + uid).remove(KEY_DATA_CENTER_PREFIX + uid)
         val committed = editor.commit()
         check(committed) { "Unable to delete Tuya account" }
     }
@@ -155,11 +205,13 @@ class SecureSettingsStore(context: Context) {
         val editor = preferences.edit()
             .remove(KEY_CAMERA_EMAIL)
             .remove(KEY_CAMERA_PASSWORD)
+            .remove(KEY_CAMERA_COUNTRY_CODE)
+            .remove(KEY_CAMERA_REGION_GUESSED)
             .remove(KEY_EXTRA_ACCOUNTS)
         preferences.all.keys
             .filter { it.startsWith(KEY_EXTRA_PASSWORD_PREFIX) }
             .forEach { editor.remove(it) }
-        if (uid != null) editor.remove(KEY_CACHED_DEVICES_PREFIX + uid)
+        if (uid != null) editor.remove(KEY_CACHED_DEVICES_PREFIX + uid).remove(KEY_DATA_CENTER_PREFIX + uid)
         val committed = editor.commit()
         check(committed) { "Unable to delete camera account" }
     }
@@ -559,8 +611,13 @@ class SecureSettingsStore(context: Context) {
         const val KEY_WIFI_PASSWORD = "home_wifi_password"
         const val KEY_TUYA_UID = "tuya_uid"
         const val KEY_TUYA_PASSWORD = "tuya_password"
+        const val KEY_TUYA_COUNTRY_CODE = "tuya_country_code"
         const val KEY_CAMERA_EMAIL = "camera_account_email"
         const val KEY_CAMERA_PASSWORD = "camera_account_password"
+        const val KEY_CAMERA_COUNTRY_CODE = "camera_account_country_code"
+        const val KEY_TUYA_REGION_GUESSED = "tuya_country_code_guessed"
+        const val KEY_CAMERA_REGION_GUESSED = "camera_account_country_code_guessed"
+        const val KEY_DATA_CENTER_PREFIX = "data_center_"
         const val KEY_EXTRA_ACCOUNTS = "extra_tuya_accounts"
         const val KEY_EXTRA_PASSWORD_PREFIX = "extra_tuya_password_"
         const val ONVIF_PREFIX = "onvif_"

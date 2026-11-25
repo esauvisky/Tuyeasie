@@ -44,6 +44,7 @@ import com.emi.tuyeasie.data.OpenPort
 import com.emi.tuyeasie.data.PortScanner
 import com.emi.tuyeasie.data.SecureSettingsStore
 import com.emi.tuyeasie.data.TuyaAccount
+import com.emi.tuyeasie.data.NEW_ACCOUNT_COUNTRY_CODE
 import com.emi.tuyeasie.data.TuyaActivationRepository
 import com.emi.tuyeasie.data.TuyaBleDevice
 import com.emi.tuyeasie.data.TuyaHotspot
@@ -200,6 +201,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
             }
 
             override fun onReady() {
+                accountRepository.recordDataCenter(checkNotNull(pairingAccount) { "Activation became ready without an account" })
                 val action = pendingAfterReady
                 if (action != null) {
                     pendingAfterReady = null
@@ -558,13 +560,6 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         pendingCameraAccount = null
         pendingAfterReady = null
         pendingLookupUuid = null
-        val account = store.loadOrCreateTuyaAccount()
-        pairingAccount = account
-        activationRepository.prepare(
-            CountryCodeProvider.current(getApplication()),
-            account,
-            AccountAuth.LOGIN_OR_REGISTER
-        )
         bleRepository.stop()
         update {
             copy(
@@ -576,6 +571,11 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 hotspotMessage = "Preparing secure Tuya activation…",
                 hotspotError = null
             )
+        }
+        withConfirmedRegions {
+            val account = store.loadOrCreateTuyaAccount()
+            pairingAccount = account
+            activationRepository.prepare(account, AccountAuth.LOGIN_OR_REGISTER)
         }
     }
 
@@ -637,9 +637,11 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         bleScanPending = false
         if (device.productName.orEmpty().contains("camera", ignoreCase = true)) {
             // Read storage, not a cache: My Devices can forget the account while this screen lives.
-            val saved = store.loadCameraAccount()
-            if (saved != null) {
-                prepareCameraAccount(saved, device, isNew = false, auth = AccountAuth.LOGIN_OR_REGISTER)
+            if (store.loadCameraAccount() != null) {
+                withConfirmedRegions {
+                    prepareCameraAccount(checkNotNull(store.loadCameraAccount()) { "Camera account vanished while confirming its region" },
+                        device, isNew = false, auth = AccountAuth.LOGIN_OR_REGISTER)
+                }
                 return
             }
             update {
@@ -690,7 +692,23 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
             update { copy(cameraAccountError = "Enter an email address and a password.") }
             return
         }
-        prepareCameraAccount(TuyaAccount(email, password), device, isNew = true, auth = current.cameraAuth)
+        if (current.cameraAuth == AccountAuth.REGISTER) {
+            prepareCameraAccount(TuyaAccount(email, password, NEW_ACCOUNT_COUNTRY_CODE), device, isNew = true, auth = AccountAuth.REGISTER)
+            return
+        }
+        // An existing account can live in any data center; probing finds it before activation signs in there.
+        update { copy(preparingCameraAccount = true, cameraAccountError = null) }
+        viewModelScope.launch {
+            val account = try {
+                withContext(Dispatchers.IO) { sdkLock.withLock { accountRepository.signInExisting(email, password) } }
+            } catch (e: TuyaSdkException) {
+                update {
+                    copy(preparingCameraAccount = false, cameraAccountError = sanitizeError(checkNotNull(e.message), settings, activatedDevice, password, *accountSecrets()))
+                }
+                return@launch
+            }
+            prepareCameraAccount(account, device, isNew = true, auth = AccountAuth.LOGIN)
+        }
     }
 
     // New credentials are persisted only after the account signed in and the session is ready.
@@ -723,7 +741,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
             )
         }
         pairingAccount = account
-        activationRepository.prepare(CountryCodeProvider.current(getApplication()), account, auth)
+        activationRepository.prepare(account, auth)
     }
 
     private fun markSessionReady() {
@@ -759,9 +777,36 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 hotspotError = null
             )
         }
-        val account = store.loadOrCreateTuyaAccount()
-        pairingAccount = account
-        activationRepository.prepare(CountryCodeProvider.current(getApplication()), account, AccountAuth.LOGIN_OR_REGISTER)
+        withConfirmedRegions {
+            val account = store.loadOrCreateTuyaAccount()
+            pairingAccount = account
+            activationRepository.prepare(account, AccountAuth.LOGIN_OR_REGISTER)
+        }
+    }
+
+    // Accounts saved before codes were stored per account sign in with LOGIN_OR_REGISTER here, which would
+    // register a duplicate in a wrong data center; their real data center is found first, once.
+    private fun withConfirmedRegions(action: () -> Unit) {
+        if (!accountRepository.hasGuessedRegions()) {
+            action()
+            return
+        }
+        update { copy(hotspotMessage = "Finding the Tuya data center of your saved accounts…") }
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) { sdkLock.withLock { accountRepository.confirmGuessedRegions() } }
+            } catch (e: TuyaSdkException) {
+                update {
+                    copy(
+                        hotspotStatus = HotspotStatus.ERROR,
+                        hotspotMessage = null,
+                        hotspotError = sanitizeError(checkNotNull(e.message), current.settings, current.activatedDevice, *accountSecrets())
+                    )
+                }
+                return@launch
+            }
+            action()
+        }
     }
 
     private fun startBleActivation(device: TuyaBleDevice) {

@@ -126,11 +126,13 @@ fun AccountsCard(viewModel: MyDevicesViewModel) {
         if (state.accounts.isEmpty()) CardText("No accounts yet. One is created when you pair your first device.")
         state.accounts.forEach { entry ->
             val linked = entry.devices.orEmpty().size
+            val label = "${entry.saved.kind.label} · " +
+                (entry.dataCenter?.let(::dataCenterName) ?: "+${entry.saved.account.countryCode}, not signed in yet")
             EntityRow(
                 icon = { EntityIcon(Icons.Outlined.AccountCircle, RowTone.NEUTRAL) },
                 title = entry.saved.account.uid,
-                state = if (linked == 0) entry.saved.kind.label
-                else "${entry.saved.kind.label} · $linked ${if (linked == 1) "device" else "devices"}, unpair to forget"
+                state = if (linked == 0) label
+                else "$label · $linked ${if (linked == 1) "device" else "devices"}, unpair to forget"
             ) {
                 CardAction("Forget", { viewModel.requestForget(entry.saved) }, enabled = !entry.loading && linked == 0)
             }
@@ -146,6 +148,16 @@ fun AccountsCard(viewModel: MyDevicesViewModel) {
         )
     }
     state.confirmation?.let { ConfirmationDialog(it, viewModel::confirm, viewModel::toggleUnpairHomeAssistant, viewModel::dismissConfirmation) }
+}
+
+// Tuya's region codes, as the SDK's ApiUrlProvider assigns them.
+private fun dataCenterName(regionCode: String) = when (regionCode) {
+    "AZ" -> "America data center"
+    "EU" -> "Europe data center"
+    "IN" -> "India data center"
+    "RU" -> "Russia data center"
+    "AY" -> "China data center"
+    else -> "$regionCode data center"
 }
 
 @Composable
@@ -180,7 +192,7 @@ private fun AddAccountDialog(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                     modifier = Modifier.fillMaxWidth()
                 )
-                if (state.adding) Text("Signing in…")
+                if (state.adding) Text("Signing in and finding the account's data center…")
                 state.addError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
         },

@@ -2,6 +2,7 @@ package com.emi.tuyeasie.data
 
 import android.content.Context
 import com.thingclips.smart.android.user.api.ILoginCallback
+import com.thingclips.smart.android.user.api.ILogoutCallback
 import com.thingclips.smart.android.user.bean.User
 import com.thingclips.smart.home.sdk.ThingHomeSdk
 import com.thingclips.smart.home.sdk.bean.HomeBean
@@ -11,6 +12,8 @@ import com.thingclips.smart.sdk.api.IResultCallback
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 enum class TuyaAccountKind(val label: String) {
     TEMPORARY("Temporary account"),
@@ -54,6 +57,12 @@ fun deviceCapabilities(bean: com.thingclips.smart.sdk.bean.DeviceBean): DeviceCa
     )
 }
 
+// One country code per Tuya data center, following the SDK's own mapping in ApiUrlProvider.getDefaultRegion:
+// +1 America (AZ), +49 Europe (EU), +91 India (IN), +7 Russia (RU), +86 mainland China (AY).
+private val DATA_CENTER_PROBE_CODES = listOf("1", "49", "91", "7", "86")
+
+private val regionLock = Mutex()
+
 class TuyaAccountRepository(context: Context, private val store: SecureSettingsStore) {
     private val appContext = context.applicationContext
 
@@ -63,14 +72,56 @@ class TuyaAccountRepository(context: Context, private val store: SecureSettingsS
             store.loadCameraAccount()?.let { SavedTuyaAccount(TuyaAccountKind.USER, it) }
         )
 
-    /** Signs in (registering if new) and only then persists the single user account. */
+    /** Signs in to an existing account, finding its data center, and only then persists it as the user account. */
     suspend fun addAccount(email: String, password: String) {
         check(store.loadCameraAccount() == null) {
             "A user account is already saved. Forget it first to switch accounts."
         }
-        val account = TuyaAccount(email, password)
-        signIn(account)
-        store.saveCameraAccount(account)
+        store.saveCameraAccount(signInExisting(email, password))
+    }
+
+    /**
+     * Finds the data center an existing account lives in by signing in through each one in turn, starting with
+     * the phone's own country. It only ever logs in, so a wrong data center can never get a duplicate account.
+     */
+    suspend fun signInExisting(uid: String, password: String): TuyaAccount {
+        logOutIfSignedIn()
+        val failures = mutableListOf<String>()
+        for (code in (listOf(CountryCodeProvider.current(appContext)) + DATA_CENTER_PROBE_CODES).distinct()) {
+            // A data center that does not hold the account rejects the login; every rejection is reported if none takes it.
+            try {
+                login(code, uid, password, register = false)
+            } catch (e: TuyaSdkException) {
+                failures += "+$code: ${e.message}"
+                continue
+            }
+            val account = TuyaAccount(uid, password, code)
+            recordDataCenter(account)
+            return account
+        }
+        throw TuyaSdkException("Tuya account sign-in", "NO_DATA_CENTER", "No Tuya data center accepted this account. ${failures.joinToString("; ")}")
+    }
+
+    /** Replaces the locale-guessed country code of accounts saved before codes were stored per account. */
+    suspend fun confirmGuessedRegions() = regionLock.withLock {
+        for (saved in savedAccounts()) {
+            if (!store.isRegionGuessed(saved.kind)) continue
+            val confirmed = signInExisting(saved.account.uid, saved.account.password)
+            when (saved.kind) {
+                TuyaAccountKind.TEMPORARY -> store.saveGeneratedTuyaAccount(confirmed)
+                TuyaAccountKind.USER -> store.saveCameraAccount(confirmed)
+            }
+        }
+    }
+
+    fun hasGuessedRegions(): Boolean = savedAccounts().any { store.isRegionGuessed(it.kind) }
+
+    // Called right after `account` signed in, so the SDK's current user is that account. The login response
+    // carries a domain only sometimes (the SDK itself copies it only when present), so its absence records nothing.
+    fun recordDataCenter(account: TuyaAccount) {
+        val user = checkNotNull(ThingHomeSdk.getUserInstance().user) { "No signed-in Tuya user after signing in" }
+        val domain = user.domain ?: return
+        store.saveDataCenter(account.uid, domain.regionCode)
     }
 
     fun forgetAccount(saved: SavedTuyaAccount) {
@@ -131,19 +182,43 @@ class TuyaAccountRepository(context: Context, private val store: SecureSettingsS
         }
     }
 
-    suspend fun signIn(account: TuyaAccount) {
-        val countryCode = CountryCodeProvider.current(appContext)
+    // Every caller signs in to a saved account. It is read back from storage because confirming a guessed
+    // region rewrites its country code, and a caller's older copy would sign in to the wrong data center.
+    suspend fun signIn(requested: TuyaAccount) {
+        confirmGuessedRegions()
+        val account = savedAccounts().single { it.account.uid == requested.uid }.account
+        val user = ThingHomeSdk.getUserInstance()
+        // The SDK keeps the previous account's data-center domain until logout, so a session in another
+        // region must end before signing in; same-region switches log in over it as before.
+        if (user.isLogin && checkNotNull(user.user) { "Signed-in Tuya session has no user" }.phoneCode != account.countryCode) {
+            logOutIfSignedIn()
+        }
+        login(account.countryCode, account.uid, account.password, register = true)
+        recordDataCenter(account)
+    }
+
+    private suspend fun logOutIfSignedIn() {
+        val user = ThingHomeSdk.getUserInstance()
+        if (!user.isLogin) return
         suspendCancellableCoroutine { cont ->
-            ThingHomeSdk.getUserInstance().loginOrRegisterWithUid(
-                countryCode,
-                account.uid,
-                account.password,
-                object : ILoginCallback {
-                    override fun onSuccess(user: User) = cont.resume(Unit)
-                    override fun onError(code: String, error: String) =
-                        cont.resumeWithException(TuyaSdkException("Tuya account sign-in", code, error))
-                }
-            )
+            user.logout(object : ILogoutCallback {
+                override fun onSuccess() = cont.resume(Unit)
+                override fun onError(code: String, error: String) =
+                    cont.resumeWithException(TuyaSdkException("Tuya sign-out from the previous region", code, error))
+            })
+        }
+    }
+
+    private suspend fun login(countryCode: String, uid: String, password: String, register: Boolean) {
+        suspendCancellableCoroutine { cont ->
+            val callback = object : ILoginCallback {
+                override fun onSuccess(user: User) = cont.resume(Unit)
+                override fun onError(code: String, error: String) =
+                    cont.resumeWithException(TuyaSdkException("Tuya account sign-in", code, error))
+            }
+            val user = ThingHomeSdk.getUserInstance()
+            if (register) user.loginOrRegisterWithUid(countryCode, uid, password, callback)
+            else user.loginWithUid(countryCode, uid, password, callback)
         }
     }
 
