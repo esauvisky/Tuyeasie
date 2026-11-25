@@ -38,6 +38,9 @@ enum class HomeAssistantError {
     SERVER_ERROR
 }
 
+/** Tuya Local's answer for one device: a profile matched, none did, or Home Assistant could not reach the device. */
+enum class TuyaLocalProbe { MATCH, NO_MATCH, UNREACHABLE }
+
 class HomeAssistantException(
     val error: HomeAssistantError,
     val publicMessage: String,
@@ -153,6 +156,100 @@ class HomeAssistantClient(
             requireAdmin(session)
             return true
         }
+    }
+
+    /**
+     * Asks Tuya Local whether it has a profile for the device without adding anything: the flow connects to the
+     * device and matches its data points, then is deleted before a profile is chosen.
+     */
+    fun probeTuyaLocal(device: ActivatedDevice, host: String): TuyaLocalProbe = withVerifiedSession { session ->
+        validateDevice(device)
+        if (findTuyaLocalEntryId(session, device.deviceId) != null) return@withVerifiedSession TuyaLocalProbe.MATCH
+        dropTuyaLocalDiscoveries(session, device.deviceId, host)
+        var step = postFlow("/api/config/config_entries/flow", mapOf("handler" to IntegrationKeys.TUYA_LOCAL))
+        val flowId = step.getString("flow_id") ?: throw invalidResponse("Home Assistant returned no Tuya Local flow ID.")
+        val flowPath = "/api/config/config_entries/flow/$flowId"
+        try {
+            if (step.getString("type") == "form" && step.getString("step_id") == "user") {
+                step = postFlow(flowPath, mapOf("setup_mode" to "manual"))
+            }
+            requireFlowStep(step, "local")
+            val protocolVersion = device.protocolVersion?.trim()?.takeIf { HomeAssistantProtocol.isSupportedProtocolVersion(it) } ?: "auto"
+            step = postFlow(flowPath, mapOf(
+                "device_id" to device.deviceId, "host" to host, "local_key" to device.localKey,
+                "protocol_version" to protocolVersion, "poll_only" to false
+            ))
+            // A flow that ends by itself (an abort) is already gone; one still showing a form is deleted below.
+            if (step.getString("type") == "abort") {
+                return@withVerifiedSession when (step.getString("reason")) {
+                    "not_supported" -> TuyaLocalProbe.NO_MATCH
+                    "already_configured" -> TuyaLocalProbe.MATCH
+                    else -> throw flowFailure(step)
+                }
+            }
+            val stepId = step.getString("step_id")
+            if (stepId == "local" && step.getJSONObject("errors")?.getString("base") == "connection") {
+                return@withVerifiedSession TuyaLocalProbe.UNREACHABLE
+            }
+            if (stepId != "select_type" && stepId != "select_type_auto_detected") throw flowFailure(step)
+            if (extractDefaultType(step) == null) TuyaLocalProbe.NO_MATCH else TuyaLocalProbe.MATCH
+        } finally {
+            if (step.getString("type") == "form") httpRequest("DELETE", flowPath, null)
+        }
+    }
+
+    /** Whether HACS is set up and running, which is what installing custom integrations goes through. */
+    fun hacsInstalled(): Boolean = withVerifiedSession { session ->
+        configEntries(session).any { it.getString("domain") == "hacs" && it.getString("state") == "loaded" }
+    }
+
+    /**
+     * Downloads each integration through HACS, adding its GitHub repository as a custom one first since neither is
+     * in the HACS default store. Home Assistant only loads them after a restart.
+     */
+    fun installWithHacs(keys: List<String>) = withVerifiedSession { session ->
+        for (key in keys) {
+            val repository = checkNotNull(HACS_REPOSITORIES[key]) { "No HACS repository is known for $key" }
+            val listed = hacsRepository(session, repository) ?: run {
+                session.callCommand("hacs/repositories/add", mapOf("repository" to repository, "category" to "integration"))
+                // HACS reports a failed add as an event, not an error, so the repository's absence is the failure signal.
+                hacsRepository(session, repository) ?: throw HomeAssistantException(
+                    HomeAssistantError.SERVER_ERROR, "HACS could not add $repository. Check the HACS log in Home Assistant."
+                )
+            }
+            if (listed.getBooleanValue("installed")) continue
+            val id = session.nextCommandId()
+            session.send(mapOf("id" to id, "type" to "hacs/repository/download", "repository" to listed.getString("id")))
+            session.awaitResult(id, HACS_DOWNLOAD_TIMEOUT_SECONDS)
+        }
+    }
+
+    private fun hacsRepository(session: WebSocketSession, fullName: String): JSONObject? {
+        val repositories = session.callCommand("hacs/repositories/list", mapOf("categories" to listOf("integration"))).getJSONArray("result")
+            ?: throw invalidResponse("HACS returned no repository list.")
+        return (0 until repositories.size).map { repositories.getJSONObject(it) }
+            .firstOrNull { it.getString("full_name").equals(fullName, ignoreCase = true) }
+    }
+
+    /** Restarts Home Assistant and returns once it is back with every handler in `expected` available. */
+    fun restartAndAwait(expected: Set<String>) {
+        withVerifiedSession { session -> session.awaitRestart() }
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RESTART_TIMEOUT_SECONDS)
+        while (System.nanoTime() < deadline) {
+            Thread.sleep(RESTART_POLL_MILLIS)
+            // While it boots, Home Assistant refuses connections or answers 5xx through a proxy; both mean "not yet".
+            val handlers = try {
+                availableFlowHandlers()
+            } catch (e: HomeAssistantException) {
+                if (e.error != HomeAssistantError.CONNECTION_FAILED && e.error != HomeAssistantError.SERVER_ERROR) throw e
+                continue
+            }
+            if (handlers.containsAll(expected)) return
+        }
+        throw HomeAssistantException(
+            HomeAssistantError.TIMEOUT,
+            "Home Assistant did not come back with ${expected.joinToString(" and ")} within ${RESTART_TIMEOUT_SECONDS / 60} minutes."
+        )
     }
 
     private fun addTuyaLocal(device: ActivatedDevice, host: String): String = withVerifiedSession { session ->
@@ -1010,6 +1107,27 @@ class HomeAssistantClient(
             }
         }
 
+        // Home Assistant drops the connection as it stops, sometimes before answering the call; either way the
+        // restart has begun once the socket closes. A failed result means it refused, such as on a bad configuration.
+        fun awaitRestart() {
+            val id = nextCommandId()
+            send(mapOf("id" to id, "type" to "call_service", "domain" to "homeassistant", "service" to "restart"))
+            while (true) {
+                val message = try {
+                    nextJson(RESTART_TIMEOUT_SECONDS)
+                } catch (e: HomeAssistantException) {
+                    if (e.error != HomeAssistantError.CONNECTION_FAILED) throw e
+                    return
+                }
+                if (message.getString("type") == "result" && message.getLongValue("id") == id && !message.getBooleanValue("success")) {
+                    throw HomeAssistantException(
+                        HomeAssistantError.SERVER_ERROR,
+                        "Home Assistant refused to restart (${message.getJSONObject("error")?.getString("message")})."
+                    )
+                }
+            }
+        }
+
         fun nextJson(timeoutSeconds: Long = MESSAGE_TIMEOUT_SECONDS): JSONObject {
             val message = nextMessage(timeoutSeconds)
             return try {
@@ -1061,6 +1179,13 @@ class HomeAssistantClient(
         const val RECONNECT_WINDOW_SECONDS = 15L
         const val RECONNECT_DELAY_MILLIS = 500L
         const val POLL_INTERVAL_MILLIS = 1000L
+        const val HACS_DOWNLOAD_TIMEOUT_SECONDS = 180L
+        const val RESTART_TIMEOUT_SECONDS = 300L
+        const val RESTART_POLL_MILLIS = 3000L
+        val HACS_REPOSITORIES = mapOf(
+            IntegrationKeys.TUYA_LOCAL to "make-all/tuya-local",
+            IntegrationKeys.LOCAL_TUYA to "xZetsubou/hass-localtuya"
+        )
         val DEFAULT_HTTP_CLIENT: OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)

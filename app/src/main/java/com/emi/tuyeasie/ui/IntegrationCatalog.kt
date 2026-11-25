@@ -5,6 +5,8 @@ import com.emi.tuyeasie.data.HaIntegrationOption
 import com.emi.tuyeasie.data.IntegrationKeys
 import com.emi.tuyeasie.data.IntegrationStatus
 import com.emi.tuyeasie.data.NetworkReport
+import com.emi.tuyeasie.hass.HomeAssistantProtocol
+import com.emi.tuyeasie.hass.TuyaLocalProbe
 
 /**
  * The integrations this device can be added to Home Assistant as: the scan found the service, Tuyeasie has an
@@ -35,6 +37,28 @@ fun buildIntegrationCatalog(capabilities: DeviceCapabilities, report: NetworkRep
         }
         HaIntegrationOption(key, label, handler, status, old?.entryId, old?.deviceRegistryId, old?.openUrl, old?.error,
             old?.updatedAt ?: System.currentTimeMillis())
+    }
+}
+
+/** Which of the two Tuya integrations suits a device better, and the reason shown to the user. */
+data class TuyaRecommendation(val key: String, val reason: String)
+
+val TUYA_INTEGRATION_LABELS = mapOf(IntegrationKeys.TUYA_LOCAL to "Tuya Local", IntegrationKeys.LOCAL_TUYA to "Local Tuya")
+
+/**
+ * Tuya Local turns a device it has a profile for into proper lights, covers and climate entities, so it wins
+ * whenever it matches; Local Tuya takes every other device. `probe` is null when Tuya Local is not installed,
+ * and then only an IR blaster has a clear answer.
+ */
+fun recommendTuyaIntegration(capabilities: DeviceCapabilities, probe: TuyaLocalProbe?): TuyaRecommendation? {
+    if (!capabilities.supportsTuyaLocal) return null
+    if (capabilities.dataPoints.any { it.code == HomeAssistantProtocol.IR_SEND_CODE }) {
+        return TuyaRecommendation(IntegrationKeys.LOCAL_TUYA, "Only Local Tuya can learn and send IR codes with it.")
+    }
+    return when (probe) {
+        TuyaLocalProbe.MATCH -> TuyaRecommendation(IntegrationKeys.TUYA_LOCAL, "Tuya Local has a profile for this device.")
+        TuyaLocalProbe.NO_MATCH -> TuyaRecommendation(IntegrationKeys.LOCAL_TUYA, "Tuya Local has no profile for this device.")
+        TuyaLocalProbe.UNREACHABLE, null -> null
     }
 }
 

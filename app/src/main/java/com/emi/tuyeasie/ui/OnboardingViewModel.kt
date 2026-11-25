@@ -132,6 +132,12 @@ data class OnboardingUiState(
     val showOnvifPassword: Boolean = false,
     val capabilities: DeviceCapabilities? = null,
     val integrationOptions: List<HaIntegrationOption> = emptyList(),
+    val tuyaRecommendation: TuyaRecommendation? = null,
+    // The config-flow handlers Home Assistant had at the last scan; null when it was not asked.
+    val homeAssistantHandlers: Set<String>? = null,
+    val installOffer: InstallOffer? = null,
+    val installProgress: String? = null,
+    val installError: String? = null,
     val chooserSelection: Set<String> = emptySet(),
     val manualDataPoints: Map<String, ManualDataPoint> = emptyMap(),
     val scanStatus: ScanStatus = ScanStatus.IDLE,
@@ -144,7 +150,12 @@ data class OnboardingUiState(
             onvifStatus == OnvifStatus.CONFIGURING || integrationOptions.any { it.status == IntegrationStatus.ADDING }
 }
 
+/** Tuya integrations Home Assistant lacks, and whether HACS is there to install them. */
+data class InstallOffer(val keys: List<String>, val hacsInstalled: Boolean)
+
 private fun OnboardingUiState.withoutDeviceState() = copy(
+    tuyaRecommendation = null,
+    homeAssistantHandlers = null,
     integrationChooserVisible = false,
     chooserSelection = emptySet(),
     integrationOptions = emptyList(),
@@ -527,6 +538,9 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                         connectionError = null
                     )
                 }
+                val handlers = withContext(Dispatchers.IO) { homeAssistantClient.availableFlowHandlers() }
+                val missing = TUYA_INTEGRATION_LABELS.keys.filter { it !in handlers }
+                if (missing.isNotEmpty()) offerInstall(missing)
                 if (current.stage == PairStage.SETUP) enterNearby()
             } catch (exception: HomeAssistantException) {
                 update {
@@ -1260,6 +1274,20 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 else buildIntegrationCatalog(capabilities, report, handlers, previous).also { store.saveIntegrationOptions(deviceId, it) }
             }
             if (scanGeneration.get() != generation) return@launch
+            // Tuya Local spends over three minutes cycling protocols on a device it cannot reach, longer than any
+            // request here waits, so it is only asked about a device whose Tuya port answered the scan.
+            val tuyaPortOpen = report.openPorts.any { it.port == TUYA_LOCAL_PORT }
+            val canProbe = handlers != null && IntegrationKeys.TUYA_LOCAL in handlers && capabilities.supportsTuyaLocal && report.ip != null && tuyaPortOpen
+            val probe = if (!canProbe) null else try {
+                updateIfCurrent { copy(scanProgress = "Asking Tuya Local whether it has a profile for this device…") }
+                val device = checkNotNull(current.activatedDevice) { "Scan finished without an open device" }
+                withContext(Dispatchers.IO) { homeAssistantClient.probeTuyaLocal(device, checkNotNull(report.ip)) }
+            } catch (e: HomeAssistantException) {
+                updateIfCurrent { copy(scanError = "Could not ask Tuya Local about a profile: ${homeAssistantMessage(e, settings)}") }
+                null
+            }
+            if (scanGeneration.get() != generation) return@launch
+            val recommendation = if (handlers == null) null else recommendTuyaIntegration(capabilities, probe)
             val adopted = if (current.onvifRecord == null && matchedCredentials != null) {
                 withContext(Dispatchers.IO) { adoptScannedStreams(deviceId, address, report, matchedCredentials) }
             } else null
@@ -1268,6 +1296,10 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                     networkReport = report,
                     online = if (report.openPorts.isEmpty()) null else true,
                     integrationOptions = options,
+                    tuyaRecommendation = recommendation,
+                    homeAssistantHandlers = handlers,
+                    // A chooser already open keeps what the user ticked.
+                    chooserSelection = if (integrationChooserVisible) chooserSelection else options.filter { it.status == IntegrationStatus.AVAILABLE && it.key == recommendation?.key }.map { it.key }.toSet(),
                     scanStatus = ScanStatus.IDLE,
                     scanProgress = null,
                     onvifRecord = adopted ?: onvifRecord,
@@ -1513,9 +1545,50 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 persistIntegrationSuccess(key, association)
             } catch (e: HomeAssistantException) {
                 if (key == IntegrationKeys.TUYA_LOCAL && e.error == HomeAssistantError.UNSUPPORTED_PROFILE) {
-                    failIntegration(key, "Tuya Local has no profile for product ${device.productId}.")
+                    failIntegration(key, "Tuya Local has no profile for product ${device.productId}. Add Local Tuya instead.")
+                    update { copy(tuyaRecommendation = TuyaRecommendation(IntegrationKeys.LOCAL_TUYA, "Tuya Local has no profile for this device.")) }
                 } else failIntegration(key, e.publicMessage)
             }
+        }
+    }
+
+    /** Asks whether to install the missing Tuya integrations, after checking HACS is there to do it. */
+    fun offerInstall(keys: List<String>) {
+        check(keys.isNotEmpty()) { "Nothing to install" }
+        viewModelScope.launch {
+            val hacs = try {
+                withContext(Dispatchers.IO) { homeAssistantClient.hacsInstalled() }
+            } catch (e: HomeAssistantException) {
+                update { copy(notice = "Could not check Home Assistant for HACS: ${homeAssistantMessage(e, settings)}") }
+                return@launch
+            }
+            update { copy(installOffer = InstallOffer(keys, hacs), installError = null, installProgress = null) }
+        }
+    }
+
+    fun dismissInstallOffer() {
+        check(current.installProgress == null) { "Cannot dismiss while installing" }
+        update { copy(installOffer = null, installError = null) }
+    }
+
+    // Home Assistant only loads a newly downloaded integration after it restarts, so the install ends with one.
+    fun confirmInstall() {
+        val offer = checkNotNull(current.installOffer) { "No install offer" }
+        check(offer.hacsInstalled) { "HACS is not installed" }
+        val names = offer.keys.joinToString(" and ") { checkNotNull(TUYA_INTEGRATION_LABELS[it]) { "No label for $it" } }
+        update { copy(installProgress = "Downloading $names through HACS…", installError = null) }
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) { homeAssistantClient.installWithHacs(offer.keys) }
+                update { copy(installProgress = "Restarting Home Assistant. This takes a minute or two…") }
+                withContext(Dispatchers.IO) { homeAssistantClient.restartAndAwait(offer.keys.toSet()) }
+            } catch (e: HomeAssistantException) {
+                update { copy(installProgress = null, installError = e.publicMessage) }
+                return@launch
+            }
+            update { copy(installOffer = null, installProgress = null, notice = "$names installed in Home Assistant.") }
+            // The open device's catalog was built without them; a new scan offers them and asks Tuya Local for a profile.
+            if (current.deviceScreenOpen && current.scanStatus == ScanStatus.IDLE) rescanNetwork()
         }
     }
 
@@ -1798,6 +1871,8 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         super.onCleared()
     }
 }
+
+private const val TUYA_LOCAL_PORT = 6668
 
 private fun homeAssistantMessage(
     exception: HomeAssistantException,

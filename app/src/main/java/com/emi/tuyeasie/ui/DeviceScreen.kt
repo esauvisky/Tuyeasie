@@ -165,6 +165,7 @@ private fun HomeAssistantIntegrationsCard(state: OnboardingUiState, viewModel: O
                     option.status == IntegrationStatus.ADDING -> "Adding…"
                     option.status == IntegrationStatus.ADDED -> "Added to Home Assistant"
                     option.status == IntegrationStatus.FAILED -> checkNotNull(option.error)
+                    option.key == state.tuyaRecommendation?.key -> "Recommended. ${checkNotNull(state.tuyaRecommendation).reason}"
                     else -> "Not added"
                 },
                 tone = tone,
@@ -177,6 +178,7 @@ private fun HomeAssistantIntegrationsCard(state: OnboardingUiState, viewModel: O
                 }
             }
         }
+        MissingRecommendationRow(state, viewModel)
         state.scanError?.let { InlineError(it) }
     }
     if (state.integrationChooserVisible) IntegrationChooserDialog(state, viewModel)
@@ -193,6 +195,55 @@ private fun HomeAssistantIntegrationsCard(state: OnboardingUiState, viewModel: O
     }
 }
 
+// The better integration for this device is not installed in Home Assistant, so it has no row to add it from.
+@Composable
+private fun MissingRecommendationRow(state: OnboardingUiState, viewModel: OnboardingViewModel) {
+    val recommendation = state.tuyaRecommendation ?: return
+    val handlers = state.homeAssistantHandlers ?: return
+    if (recommendation.key in handlers) return
+    EntityRow(
+        icon = { EntityIcon(categoryIcon(state.activatedDevice?.category), RowTone.NEUTRAL) },
+        title = checkNotNull(TUYA_INTEGRATION_LABELS[recommendation.key]) { "No label for ${recommendation.key}" },
+        state = "Recommended. ${recommendation.reason} Not installed in Home Assistant."
+    ) {
+        CardAction("Install", { viewModel.offerInstall(listOf(recommendation.key)) }, enabled = state.installProgress == null)
+    }
+}
+
+/** Offers to install missing Tuya integrations through HACS, or explains how to get HACS first. */
+@Composable
+fun InstallIntegrationsDialog(state: OnboardingUiState, viewModel: OnboardingViewModel) {
+    val offer = state.installOffer ?: return
+    val uriHandler = LocalUriHandler.current
+    val names = offer.keys.joinToString(" and ") { checkNotNull(TUYA_INTEGRATION_LABELS[it]) { "No label for $it" } }
+    val installing = state.installProgress != null
+    AlertDialog(
+        onDismissRequest = { if (!installing) viewModel.dismissInstallOffer() },
+        title = { Text("Install $names?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (offer.hacsInstalled) {
+                    Text("Your Home Assistant doesn't have $names, which Tuyeasie uses to add Tuya devices. " +
+                        "Tuyeasie can install them through HACS. Home Assistant then restarts, which takes it offline for a minute or two.")
+                } else {
+                    Text("Your Home Assistant doesn't have $names, which Tuyeasie uses to add Tuya devices. " +
+                        "Installing them needs HACS, which isn't set up in your Home Assistant. Set up HACS, then connect again.")
+                }
+                state.installProgress?.let { StatusLine(it, busy = true) }
+                state.installError?.let { InlineError(it) }
+            }
+        },
+        confirmButton = {
+            if (offer.hacsInstalled) TextButton(onClick = viewModel::confirmInstall, enabled = !installing) {
+                Text(if (state.installError != null) "Try again" else "Install and restart")
+            } else TextButton(onClick = { uriHandler.openUri(HACS_SETUP_URL) }) { Text("HACS guide") }
+        },
+        dismissButton = { TextButton(onClick = viewModel::dismissInstallOffer, enabled = !installing) { Text("Not now") } }
+    )
+}
+
+private const val HACS_SETUP_URL = "https://hacs.xyz/docs/use/"
+
 @Composable
 private fun IntegrationChooserDialog(state: OnboardingUiState, viewModel: OnboardingViewModel) {
     val selected = state.chooserSelection
@@ -202,7 +253,8 @@ private fun IntegrationChooserDialog(state: OnboardingUiState, viewModel: Onboar
         text = {
             Column {
                 state.integrationOptions.filter { it.status == IntegrationStatus.AVAILABLE }.forEach { option ->
-                    CheckRow(option.label, option.key in selected) { viewModel.toggleChooserOption(option.key) }
+                    val label = if (option.key == state.tuyaRecommendation?.key) "${option.label} (recommended)" else option.label
+                    CheckRow(label, option.key in selected) { viewModel.toggleChooserOption(option.key) }
                 }
             }
         },

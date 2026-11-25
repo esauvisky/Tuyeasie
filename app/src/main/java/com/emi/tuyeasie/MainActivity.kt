@@ -48,6 +48,7 @@ import com.emi.tuyeasie.data.TuyaManagedDevice
 import com.emi.tuyeasie.ui.DeviceNameDialog
 import com.emi.tuyeasie.ui.DeviceScreen
 import com.emi.tuyeasie.ui.DevicesScreen
+import com.emi.tuyeasie.ui.InstallIntegrationsDialog
 import com.emi.tuyeasie.ui.MyDevicesViewModel
 import com.emi.tuyeasie.ui.OnboardingViewModel
 import com.emi.tuyeasie.ui.PairScreen
@@ -157,6 +158,7 @@ class MainActivity : ComponentActivity() {
                         onUnpair = { unpairFromHomeAssistant = true; pendingUnpair = true }
                     )
                 }
+                InstallIntegrationsDialog(state, viewModel)
                 state.namingDevice?.let { device ->
                     val devicesState by myDevicesViewModel.uiState.collectAsStateWithLifecycle()
                     // The list may already hold this device under the name Tuya gave it.
